@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -12,7 +13,8 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_MAC, CONF_NAME
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.components.bluetooth import (
-    async_discovered_service_info
+    BluetoothServiceInfoBleak,
+    async_discovered_service_info,
 )
 
 from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR, DOMAIN
@@ -22,6 +24,7 @@ from .godrej.exception import InvalidDeviceError, ConnectionError
 _LOGGER = logging.getLogger(__name__)
 
 MANUAL_MAC = "manual_mac"
+_MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
 
 
 class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -33,6 +36,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self.command_char = None
         self.reply_char = None
         self._manual_entry = False
+        self._discovered = False
         self._smartmatic: SmartMatic | None = None
         self._detect_task: asyncio.Task | None = None
         self._detect_error: str | None = None
@@ -104,6 +108,34 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors
         )
 
+    async def async_step_bluetooth(
+        self, discovery_info: BluetoothServiceInfoBleak
+    ) -> ConfigFlowResult:
+        """Offer a device Home Assistant heard advertising."""
+        await self.async_set_unique_id(format_mac(discovery_info.address))
+        self._abort_if_unique_id_configured()
+        if not self._is_device_supported(discovery_info):
+            return self.async_abort(reason="not_supported")
+        self.mac = discovery_info.address
+        self._discovered = True
+        self.context["title_placeholders"] = {"name": discovery_info.name}
+        return await self.async_step_bluetooth_confirm()
+
+    async def async_step_bluetooth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> ConfigFlowResult:
+        """Confirm a discovered device, then detect its channels."""
+        if user_input is not None:
+            return await self.async_step_validate()
+        self._set_confirm_only()
+        return self.async_show_form(
+            step_id="bluetooth_confirm",
+            description_placeholders={"address": self.mac},
+            errors=errors or {},
+        )
+
     async def async_step_manual_mac(
         self,
         user_input: dict[str, Any] | None = None,
@@ -112,10 +144,9 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle manual mac step."""
         if user_input is not None:
             self.mac = user_input[CONF_MAC]
-
-            try:
-                normalized_mac = format_mac(self.mac)
-            except ValueError:
+            # format_mac returns anything it can't parse unchanged.
+            normalized_mac = format_mac(self.mac)
+            if not _MAC_RE.fullmatch(normalized_mac):
                 return self.async_show_form(
                     step_id="manual_mac",
                     data_schema=vol.Schema({vol.Required(CONF_MAC): str}),
@@ -210,6 +241,8 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         if error:
+            if self._discovered:
+                return await self.async_step_bluetooth_confirm(errors={"base": error})
             if self._manual_entry:
                 return await self.async_step_manual_mac(errors={"base": error})
             return await self.async_step_user(errors={"base": error})

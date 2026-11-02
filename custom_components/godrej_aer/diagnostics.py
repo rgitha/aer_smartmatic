@@ -52,6 +52,7 @@ async def async_get_config_entry_diagnostics(
         },
         "connection": {
             "reachable": instance.reachable,
+            "heard": instance.heard,
             "advertising": instance._advertising,
             "last_exchange_ok": instance._last_exchange_ok,
             "link_open": bool(instance.client and instance.client.is_connected),

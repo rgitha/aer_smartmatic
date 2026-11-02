@@ -1,15 +1,17 @@
 {
     "config": {
+        "flow_title": "{name}",
         "abort": {
             "already_configured": "Device is already configured",
-            "channels_detected": "Detected command channel {command} and reply channel {reply}."
+            "channels_detected": "Detected command channel {command} and reply channel {reply}.",
+            "not_supported": "This is not a supported Smart Matic device"
         },
         "error": {
             "cannot_connect": "Failed to connect",
             "invalid_mac": "Invalid MAC address",
             "invalid_device": "This is not a supported Smart Matic device",
             "unknown": "Unexpected error",
-            "no_reply": "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, close the Godrej app, and try again."
+            "no_reply": "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, disconnect any phone connected to it, and try again."
         },
         "step": {
             "user": {
@@ -17,6 +19,10 @@
                 "data": {
                     "mac": "Device"
                 }
+            },
+            "bluetooth_confirm": {
+                "title": "Set up {name}",
+                "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to find its channels."
             },
             "manual_mac": {
                 "title": "Enter MAC Address",
@@ -202,6 +208,15 @@
         },
         "schedules_not_stored": {
             "message": "The device didn't store all the schedules. Check them with Update status."
+        },
+        "no_devices_matched": {
+            "message": "No loaded Smart Matic devices match the target."
+        },
+        "update_failed": {
+            "message": "Couldn't update {count} device(s). {address}: {error}"
+        },
+        "invalid_schedule": {
+            "message": "{error}"
         }
     }
 }

@@ -863,6 +863,24 @@ async def test_reachable_follows_advertisements(monkeypatch):
     assert matic.reachable is True
 
 
+async def test_heard_changes_are_announced_after_a_failed_exchange(monkeypatch):
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    events = []
+    matic.eventbus.add_listener(gm.DEVICE_REACHABILITY, AsyncMockRecorder(events))
+    matic._set_exchange_ok(False)  # Connection status: Unreachable
+    await asyncio.sleep(0)
+    events.clear()
+
+    # Unreachable throughout, but entities must still hear heard change.
+    matic.set_advertising(False)
+    matic.set_advertising(False)
+    matic.set_advertising(True)
+    await asyncio.sleep(0)
+    assert matic.reachable is False
+    assert len(events) == 2
+
+
 async def test_failed_press_marks_unreachable(monkeypatch):
     device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
     matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)

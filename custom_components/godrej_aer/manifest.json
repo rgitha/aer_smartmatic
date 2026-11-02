@@ -1,6 +1,12 @@
 {
   "domain": "godrej_aer",
   "name": "Godrej Aer Smart Matic",
+  "bluetooth": [
+    {
+      "local_name": "Smart Matic*",
+      "connectable": true
+    }
+  ],
   "codeowners": [
     "@ov1d1u"
   ],

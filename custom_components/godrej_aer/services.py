@@ -118,8 +118,8 @@ def async_setup_services(hass: HomeAssistant) -> None:
         instances = await _async_matched_instances(hass, call)
         _LOGGER.debug("Update status action run for %s", [i.mac for i in instances])
         if not instances:
-            raise HomeAssistantError(
-                "No loaded Godrej Aer Smart Matic devices matched the service call"
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="no_devices_matched"
             )
 
         async def _update(instance: SmartMatic) -> None:
@@ -145,9 +145,14 @@ def async_setup_services(hass: HomeAssistant) -> None:
         if errors:
             first_instance, first_error = errors[0]
             raise HomeAssistantError(
-                f"Status update failed for {len(errors)} device(s); "
-                f"{first_instance.mac}: {first_error}"
-            )
+                translation_domain=DOMAIN,
+                translation_key="update_failed",
+                translation_placeholders={
+                    "count": str(len(errors)),
+                    "address": first_instance.mac,
+                    "error": str(first_error),
+                },
+            ) from first_error
 
     hass.services.async_register(
         DOMAIN, SERVICE_UPDATE_STATUS, _async_update_status
@@ -161,14 +166,18 @@ def async_setup_services(hass: HomeAssistant) -> None:
             [i.mac for i in instances],
         )
         if not instances:
-            raise HomeAssistantError(
-                "No loaded devices matched the action"
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="no_devices_matched"
             )
         for instance in instances:
             try:
                 await async_send_command(change(instance))
             except ScheduleError as e:
-                raise ServiceValidationError(str(e)) from e
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_schedule",
+                    translation_placeholders={"error": str(e)},
+                ) from e
 
     async def _async_set_schedules(call: ServiceCall) -> None:
         schedules = [_schedule_from(item) for item in call.data["schedules"]]

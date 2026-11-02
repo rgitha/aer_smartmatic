@@ -46,17 +46,17 @@ ACK_TIMEOUT = 5
 CONNECT_ATTEMPTS = 1
 CONNECT_TIMEOUT = 5
 # Seconds to wait after connecting before sending a button command.
-# Polls wait 2 s, like the official app.
+# Polls wait 2 s.
 ACTION_SETTLE = 0.5
 # Seconds to back off background polls after consecutive failed attempts:
 # short at first (e.g. a proxy still reconnecting after a restart), then
 # every 5 minutes while the device stays unreachable. A success resets it.
 CONNECT_RETRY_BACKOFF = (30, 60, 120, 300)
 
-# Auto-spray intervals the device (and the official app) support, in minutes.
+# Auto-spray intervals the device supports, in minutes.
 SPRAY_INTERVALS = (10, 20, 40)
 # Interval used when auto-spray is switched on without an explicit choice
-# (matches the official app's on/off toggle).
+# (the device's own default).
 DEFAULT_SPRAY_INTERVAL = 10
 # The device reports the open-circuit voltage of its two AA cells and
 # stops driving the motor below 2.4 V (it still acknowledges sprays).

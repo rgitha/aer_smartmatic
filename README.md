@@ -1,31 +1,128 @@
 # Godrej Aer Smart Matic Integration for Home Assistant
 
-This is a custom integration for Home Assistant to support Godrej Aer Smart Matic, a Bluetooth Low Energy (BLE) room freshener device. Using this integration, you can monitor and control your Godrej Aer Smart Matic directly from Home Assistant.
+A custom integration for the Godrej Aer Smart Matic, a battery-powered
+Bluetooth Low Energy (BLE) room freshener. It reads the device's status and
+controls it locally over Bluetooth, through an adapter on the Home Assistant
+host or an ESPHome Bluetooth proxy. No cloud account is needed.
 
-## Supported Features
+## Use cases
 
-This integration currently supports the following features:
+- Spray when someone enters a room, or before guests arrive.
+- Turn auto-spray on while you're home and off when everyone leaves.
+- Get notified when the batteries or the refill run low.
+- Keep spray schedules on the device, so they run even when Home Assistant
+  is down, and edit them from Home Assistant.
 
-- Status sensor: Idle, Auto, Schedule or Disconnected (not heard, or the last exchange failed); the mode is from the last status read (see Updated last)
-- Spray once via a `button` entity
-- Auto-spray mode via a `select` entity: Off, or every 10, 20 or 40 minutes (attribute `started_by`: app, schedule or button)
-- Identify (diagnostic button): lights the device's three interval lights for 3 seconds. Works only while auto-spray is off and no schedule is running
-- Reset the refill level via a `button` entity (after replacing the cartridge)
-- Battery level as a percentage of what the device can use: the alkaline discharge curve, from 3.1 V (100 %) down to the device's 2.4 V cut-off (0 %); the measured voltage is a diagnostic sensor. Below 2.4 V the device still acknowledges sprays without spraying, so Spray now and Spray: auto show "Batteries are too low to spray"
-- Estimated refill level (%) and lifetime spray count sensors
-- Connection status (diagnostic): OK, or Unreachable when the device isn't heard or the last exchange failed
-- Updated last (diagnostic): when the last status was read; the Update status button reads it now
-- On-demand status refresh via the `godrej_aer.update_status` service
-- Diagnostics download (device page, ⋮ → Download diagnostics), with the address and name redacted
+## Supported devices
 
-## Services
+The Godrej Aer Smart Matic. Tested on firmware 3.0.8-IN.
+
+## Supported functions
+
+**Controls**
+- **Spray now:** sprays once.
+- **Spray: auto:** Off, or every 10, 20 or 40 minutes. The `started_by`
+  attribute shows what started it: app, schedule or button.
+- **Reset refill level:** after replacing the cartridge.
+- **Identify** (diagnostic): lights the device's three interval lights for 3
+  seconds. It works only while auto-spray is off and no schedule is running.
+
+**Sensors**
+- **Status:** Idle, Auto, Schedule or Disconnected. The mode comes from the
+  last status read.
+- **Battery:** a percentage of what the device can use, from 3.1 V (100 %)
+  down to its 2.4 V cut-off (0 %). The voltage is a diagnostic sensor
+  (disabled by default).
+- **Refill level** (an estimate from the spray count) and **Spray count**
+  (lifetime).
+- **Schedules:** the number of schedules on the device. Its attributes list
+  them (days, start, end, interval), the one **running** now, and when they
+  were **last read**.
+
+**Schedules**
+
+The device runs up to 10 schedules on its own: days, a start and end time,
+and an interval of 10, 20 or 40 minutes. An end at or before the start means
+the next day, so a window can run past midnight, up to 24 hours. The end is
+rounded down to a whole interval, and a schedule holds at most 144 sprays.
+To edit them from a dashboard, use the
+[schedule card](https://github.com/rgitha/godrej-aer-schedule-card).
+
+**Diagnostic sensors**
+- **Connection status:** OK, or Unreachable when the device isn't heard or the
+  last exchange failed.
+- **Updated last:** when the status was last read.
+- **Signal strength:** with the adapter or proxy that received it.
+- **Channel: command**, **Channel: reply** and **Connection link:** for
+  debugging, disabled by default.
+
+**Other**
+- **Update status** button and action (also reads the schedules).
+- **Diagnostics download:** on the device page, ⋮ → Download diagnostics. The
+  address and name are redacted.
+
+## Installation
+
+### HACS
+
+1. In HACS, open the menu and choose **Custom repositories**.
+2. Add `https://github.com/ov1d1u/godrej_aer` as an **Integration**.
+3. Install **Godrej Aer Smart Matic** and restart Home Assistant.
+
+### Manual
+
+Copy `custom_components/godrej_aer` into your `config/custom_components`
+folder and restart Home Assistant.
+
+## Configuration
+
+Home Assistant discovers devices it can hear and offers them under
+**Settings → Devices & services**; choose **Add** and confirm. To add one
+yourself, choose **Add integration → Godrej Aer Smart Matic**.
+
+| Step | Parameter | Description |
+|---|---|---|
+| Select device | Device | A Smart Matic that Home Assistant can hear, or **Enter MAC address manually**. |
+| Enter MAC address | MAC address | The device's Bluetooth address, e.g. `AA:BB:CC:DD:EE:FF`. |
+| Name device | Name | The device and entity name prefix, e.g. Hall. |
+
+There are no other options. If the device stops answering after a firmware
+update, use **Reconfigure** on the integration entry.
+
+## Removal
+
+1. Go to **Settings → Devices & services → Godrej Aer Smart Matic**.
+2. Open the device entry's ⋮ menu and choose **Delete**.
+3. To remove the integration completely, uninstall it in HACS (or delete
+   `custom_components/godrej_aer`) and restart Home Assistant.
+
+The device keeps its auto-spray setting and schedules, and runs on its own.
+
+## Data updates
+
+The device doesn't push changes, so the integration reads its status:
+- once an hour while the device is heard;
+- after every command;
+- when you press **Update status** or call the action.
+
+The schedules are read once after startup, after every schedule change and
+with Update status.
+
+To save battery, it disconnects after each exchange, so the link opening and
+closing is normal. After a failed read it retries after 30 s, 1, 2 and 5
+minutes, then every 5 minutes until the device answers.
+
+When Home Assistant hasn't heard the device's advertisements for a few minutes
+(typically 3 to 8), Connection status turns Unreachable, Status shows
+Disconnected, and the readings and controls become unavailable. They return
+as soon as the device is heard again.
+
+## Actions
 
 ### `godrej_aer.update_status`
 
-Connects to the device, refreshes its status (mode, battery, counters) and
-reads its schedules, bypassing the automatic retry cooldown that applies to
-background polling. Target one or more devices/entities, or call it without
-a target to update every configured device.
+Reads the status and schedules now, ignoring the retry wait. Target one or
+more devices or entities, or leave the target out to update every device.
 
 ```yaml
 action: godrej_aer.update_status
@@ -33,117 +130,109 @@ target:
   device_id: <your Smart Matic device>
 ```
 
-## Installation
+### Schedule actions
 
-### Manual Installation
+All target one or more devices.
 
-1. **Download the Repository**: Clone or download this repository and place it within your Home Assistant `config` directory, making sure the final path is `/config/custom_components/godrej_aer`.
+| Action | Fields |
+|---|---|
+| `godrej_aer.set_schedules` | `schedules`: the whole list. Optional `expected`: the list you started from; nothing is written if the device's list changed meanwhile. |
+| `godrej_aer.add_schedule` | `days`, `start`, `end`, `interval` |
+| `godrej_aer.remove_schedule` | `number`: its number in the Schedules sensor's list |
+| `godrej_aer.clear_schedules` | none |
+| `godrej_aer.stop_schedule` | `schedule`: `current`, `all` or a number. Skips a running schedule; the device acknowledges but ignores a number that isn't running. |
 
-2. **Restart Home Assistant**: After adding the custom component to your setup, restart Home Assistant to ensure it finds the new integration.
+Every upload is read back, and an error is shown if the device didn't keep it.
 
-3. **Add the Integration**: Navigate to the Home Assistant UI and go to **Settings > Devices & Services > Integrations** and look for "Godrej Aer Smart Matic". Follow the on-screen instructions to complete setup.
+```yaml
+action: godrej_aer.add_schedule
+target:
+  device_id: <your Smart Matic device>
+data:
+  days: [mon, tue, wed, thu, fri]
+  start: "07:00"
+  end: "10:00"
+  interval: 20
+```
 
-### Installation via HACS
+## Examples
 
-1. **Open HACS**: Go to the Home Assistant UI, click on **HACS** in the sidebar, then click on **Integrations**.
+Spray when motion is detected in the hall, at most once every 15 minutes:
 
-2. **Add Custom Repository**: Click the three dots in the top right corner, then select **Custom repositories**.
+```yaml
+automation:
+  - alias: Hall freshener on motion
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.hall_motion
+        to: "on"
+    actions:
+      - action: button.press
+        target:
+          entity_id: button.hall_spray_now
+      - delay: "00:15:00"
+```
 
-3. **Enter the Repository URL**: Add `https://github.com/ov1d1u/godrej_aer` in the URL field, and select **Integration** as the category. Click **Add**.
+Notify when the battery is low:
 
-4. **Install the Integration**: Search for "Godrej Aer Smart Matic" in HACS. Click on it, then click **Install**.
+```yaml
+automation:
+  - alias: Hall freshener battery low
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.hall_battery
+        below: 15
+    actions:
+      - action: notify.notify
+        data:
+          message: "Replace the batteries in the hall freshener."
+```
 
-5. **Restart Home Assistant**: After installation, restart Home Assistant.
+## Known limitations
 
-6. **Add the Integration through Home Assistant**: Navigate to **Settings > Devices & Services > Integrations** and look for "Godrej Aer Smart Matic". Follow the on-screen setup instructions.
-
-## Configuration
-
-To configure the Godrej Aer Smart Matic integration:
-
-1. **Automatic Discovery**: The integration will attempt to automatically discover any Godrej Aer Smart Matic devices via Bluetooth.
-   
-2. **Manual MAC Address Entry**: If your device is not automatically discovered, you can manually enter the MAC address.
-
-## Command and reply channels
-
-The device takes commands on a characteristic of the `6e400000-…` service
-and replies with notifications on `6e400001-…`. Firmware 3.0.8-IN accepts
-commands on `6e400002-…`, `6e400003-…` and `6e400004-…` alike; other builds
-have been reported to use `6e400003-…` only.
-
-When you add a device, the integration checks the defaults (commands on
-`6e400002-…`, replies on `6e400001-…`) with the read-only fetch-status
-request. If they don't answer, it probes every writable characteristic of
-the service, with every notifying one subscribed, and stores whichever pair
-answers. If nothing answers, nothing is stored and you can try again.
-
-To check again, for example after a firmware update, use **Reconfigure** on
-the integration entry. Setup and Reconfigure show each step as it runs.
-Devices added with an older version use the defaults until reconfigured.
-
-## Schedules
-
-The device runs up to 10 schedules on its own: days, a start and end time,
-and an interval of 10, 20 or 40 minutes. An end at or before the start means
-the next day, so a window can run past midnight, up to 24 hours. The end is
-rounded down to a whole interval.
-
-- **Schedules** sensor: the device's list, as attributes.
-- Actions: **Add schedule**, **Remove schedule** (by its number in that
-  list), **Set schedules**, **Clear schedules**, and **Skip schedule run**
-  (stops today's run; it runs again in its next window).
-- Other tools that write the device's schedules may not read them back
-  first, so a change made there can replace the ones set here. Manage them
-  from one place.
-
-## Command confirmation
-
-Every command (Spray now, Spray: auto, Reset refill level) waits
-up to 5 seconds for the device's acknowledgement. Without one, Home
-Assistant shows an error, Spray: auto keeps its previous state, and the
-status is read back so the entities show what the device is actually doing.
-
-The channels in use and the battery voltage (both disabled by default) and the signal strength of the device's
-advertisements (with the adapter or proxy that received them) are shown as
-diagnostic sensors on the device page.
-
-`6e400001-…` has no Client Characteristic Configuration descriptor, which
-the ESPHome Bluetooth proxy normally requires before forwarding
-notifications. When subscribing the normal way fails, the integration asks
-the proxy to forward that characteristic directly.
-
-Status replies are decoded as CBOR by key, so frames of other lengths (other
-firmware string lengths, extra fields) work, as do frames split over several
-notifications.
-
-To save battery, the integration disconnects after each exchange, so the
-link opening and closing is normal. **Connection status** shows whether the device is
-actually working: it reads **OK**, and changes to **Unreachable** only if an
-exchange fails or the device stops advertising. After a failed attempt the
-integration retries after 30 s, then 1, 2 and 5 minutes, and every 5 minutes
-from then on until the device answers. **Updated last** shows when the
-last status arrived, and **Status** shows Disconnected while Connection
-status is Unreachable. The raw **Connection link** sensor
-(Active/Idle) is disabled by default; enable it to debug connections.
+- **Range:** the device's Bluetooth range is short. Keep it close to an
+  adapter or proxy.
+- **One connection at a time:** while a phone is connected to the device, Home
+  Assistant can't reach it.
+- **Status isn't live:** changes made with the device's button or a phone show
+  up at the next status read (up to an hour), or sooner with Update status.
+- **Low batteries:** below 2.4 V the device still acknowledges sprays without
+  spraying. Spray now and Spray: auto then show "Batteries are too low to
+  spray".
+- **Refill level** is an estimate from the spray count, not a measurement.
+- **Schedules from other tools:** a phone app that writes the device's
+  schedules may not read them first, so a change made there can replace the
+  ones set here. Manage them from one place.
+- **Skipping ahead:** only a schedule that is running can be skipped; a later
+  run can't be skipped in advance.
 
 ## Troubleshooting
 
-- **Device Not Found**: Ensure that your Godrej Aer Smart Matic device is powered on and within Bluetooth range. This devices seems to have bad connectivity range, so make sure that the device is pretty close to a Bluetooth proxy.
-- **Connection Issues**: If you're using Bluetooth proxies, sometimes it seems that they "hang" on the connection. Restart them and try again.
+- **Device not found, or "The device didn't respond":** check that it has
+  batteries, move it closer to an adapter or proxy, disconnect any phone
+  connected to it, and try again.
+- **Unreachable or Disconnected:** as above. **Signal strength** shows how well
+  the adapter or proxy hears the device.
+- **A command shows an error:** the device didn't confirm it within 5 seconds.
+  The status is read back afterwards, so the entities show what the device is
+  actually doing.
+- **The proxy seems stuck:** ESPHome Bluetooth proxies sometimes hang on a
+  connection. Restart the proxy.
+- **Reporting a problem:** attach the diagnostics download, and a debug log
+  (on the integration page, ⋮ → Enable debug logging).
 
 ## Development
 
-The device library has a small test suite that runs without Home Assistant:
+The device library has a test suite that runs without Home Assistant:
 
 ```
 pip install pytest pytest-asyncio bleak bleak-retry-connector
 pytest
 ```
 
-The config flow, options flow and entry setup are tested against Home
-Assistant itself, in a separate environment (Home Assistant's Bluetooth
-component also needs its own requirements, listed in its `manifest.json`):
+The config flow, entities and entry setup are tested against Home Assistant
+itself, in a separate environment:
 
 ```
 pip install pytest-homeassistant-custom-component
@@ -152,16 +241,15 @@ pytest tests_ha
 
 ## License
 
-This project is licensed under the terms of the Apache 2.0 license.
+Apache License 2.0.
 
 ## Contributions
 
-Contributions are welcome! Please provide bug reports or suggestions via GitHub issues or submit a pull request for any enhancements or fixes.
+Bug reports and suggestions are welcome as GitHub issues, and fixes as pull
+requests.
 
 ## Disclaimer
 
-This project is not associated with Godrej Aer. All rights regarding the devices are reserved to Godrej Aer.
-
-## Warning
-
-This integration is very experimental and is not officially supported. Use at your own risk.
+This project is not associated with Godrej Aer. All rights regarding the
+devices are reserved to Godrej Aer. It is experimental and not officially
+supported. Use at your own risk.

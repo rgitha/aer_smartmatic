@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import async_device_device_info_fn, async_send_command
 from .godrej import SmartMatic
+from .godrej.events import DEVICE_REACHABILITY
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,7 +48,24 @@ class SmartMaticButton(ButtonEntity):
         return async_device_device_info_fn(self._instance, self._config_entry.data[CONF_NAME])
 
 
-class SmartMaticSprayNowButton(SmartMaticButton):
+class SmartMaticDeviceButton(SmartMaticButton):
+    """A button that acts on the device: unavailable while it isn't heard."""
+
+    @property
+    def available(self) -> bool:
+        return self._instance.heard
+
+    async def async_added_to_hass(self) -> None:
+        self._instance.eventbus.add_listener(DEVICE_REACHABILITY, self._on_reachability)
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
+
+    async def _on_reachability(self, _instance) -> None:
+        self.async_write_ha_state()
+
+
+class SmartMaticSprayNowButton(SmartMaticDeviceButton):
     """Spray once, now."""
 
     _key = "trigger"
@@ -58,7 +76,7 @@ class SmartMaticSprayNowButton(SmartMaticButton):
         await async_send_command(self._instance.spray_now())
 
 
-class SmartMaticResetRefillButton(SmartMaticButton):
+class SmartMaticResetRefillButton(SmartMaticDeviceButton):
     """Tell the device its cartridge has been refilled."""
 
     _key = "reset_refill"
@@ -89,7 +107,7 @@ class SmartMaticUpdateStatusButton(SmartMaticButton):
         await self._instance.read_schedules_quietly()
 
 
-class SmartMaticIdentifyButton(SmartMaticButton):
+class SmartMaticIdentifyButton(SmartMaticDeviceButton):
     """Light the device's three interval lights for a few seconds (HA's
     standard identify button: the type only sets its icon and name)."""
 

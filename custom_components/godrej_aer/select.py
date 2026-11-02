@@ -14,7 +14,7 @@ from .const import DOMAIN
 from .entity import AcceptedButFlat, async_device_device_info_fn, async_send_command
 from .godrej import SmartMatic, DeviceStatus
 from .godrej.const import SPRAY_INTERVALS
-from .godrej.events import DEVICE_STATUS_UPDATE
+from .godrej.events import DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE
 
 OFF = "Off"
 _INTERVAL_BY_OPTION = {f"Every {minutes} min": minutes for minutes in SPRAY_INTERVALS}
@@ -64,15 +64,24 @@ class SmartMaticAutoSpraySelect(SelectEntity):
             self._attr_current_option = OFF
         self._attr_extra_state_attributes = {"started_by": status.spray_source}
 
+    @property
+    def available(self) -> bool:
+        return self._instance.heard
+
     async def async_added_to_hass(self) -> None:
         self._instance.eventbus.add_listener(
             DEVICE_STATUS_UPDATE, self.on_status_update
         )
+        self._instance.eventbus.add_listener(DEVICE_REACHABILITY, self._on_reachability)
 
     async def async_will_remove_from_hass(self) -> None:
         self._instance.eventbus.remove_listener(
             DEVICE_STATUS_UPDATE, self.on_status_update
         )
+        self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
+
+    async def _on_reachability(self, _instance) -> None:
+        self.async_write_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:

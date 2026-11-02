@@ -58,7 +58,7 @@ from .events import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Seconds between the set-time message and the next one, as the app does.
+# Seconds between the set-time message and the next one.
 SET_TIME_PACING = 1.0
 
 # Limits for reassembling frames split over several notifications.
@@ -111,9 +111,8 @@ def _cbor_key(text: str) -> bytes:
 def encode_message(**fields: int | bool) -> bytes:
     """Encode a device message as an indefinite-length CBOR map.
 
-    Mirrors the official app, which builds these with Jackson's
-    ``writeStartObject()`` / ``writeEndObject()`` (emitting ``BF … FF``)
-    and passes the *response* message type as ``mN``. Values are ints, or
+    Messages are indefinite-length maps (``BF … FF``), with the
+    *response* message type as ``mN``. Values are ints, or
     bools (encoded as CBOR true/false).
     """
     out = bytearray([0xBF])  # indefinite-length map
@@ -171,9 +170,7 @@ def encode_schedules(schedules: list[Schedule]) -> bytes:
 
 
 def encode_set_time(now: datetime | None = None) -> bytes:
-    """Build the ``mT=102`` set-time message the way the official app does.
-
-    The app sends an indefinite-length CBOR map with the epoch (``eP``,
+    """Build the ``mT=102`` set-time message: an indefinite-length CBOR map with the epoch (``eP``,
     always forced to a fixed 8-byte integer), the standard (non-DST) UTC
     offset in minutes negated (``tZ``), and the zone's DST savings in
     milliseconds (``tD``). ``mN`` is the response message type (152), same
@@ -276,21 +273,40 @@ class SmartMatic:
 
     def set_advertising(self, seen: bool) -> None:
         """Report whether Home Assistant currently sees the device advertise."""
-        self._advertising = seen
-        self._update_reachable()
+        heard_changed = self._set_heard(seen)
+        self._update_reachable(force=heard_changed)
 
     def _set_exchange_ok(self, ok: bool) -> None:
         self._last_exchange_ok = ok
-        if ok:
-            self._advertising = True  # it answered, so it is in range
-        self._update_reachable()
+        heard_changed = self._set_heard(True) if ok else False  # it answered
+        self._update_reachable(force=heard_changed)
 
-    def _update_reachable(self) -> None:
+    def _set_heard(self, seen: bool) -> bool:
+        """Track whether the device is heard, logging each change once.
+
+        Returns True when ``heard`` changed, so entities can be told even if
+        Connection status stays the same (e.g. after a failed exchange)."""
+        was_heard = self.heard
+        if seen and self._advertising is False:
+            _LOGGER.info("%s is heard again; its entities are available", self.mac)
+        elif not seen and self._advertising is not False:
+            _LOGGER.info("%s is no longer heard; its entities are unavailable", self.mac)
+        self._advertising = seen
+        return self.heard != was_heard
+
+    @property
+    def heard(self) -> bool:
+        """False once Home Assistant reports the device gone (no advertisements
+        for a while), until it is heard again. Entities that read or control
+        the device are unavailable while it is not heard."""
+        return self._advertising is not False
+
+    def _update_reachable(self, *, force: bool = False) -> None:
         if self._advertising is None and self._last_exchange_ok is None:
             value = None
         else:
             value = self._advertising is not False and self._last_exchange_ok is not False
-        if value != self.reachable:
+        if value != self.reachable or force:
             self.reachable = value
             self.eventbus.send(DEVICE_REACHABILITY, self)
 
@@ -847,7 +863,7 @@ class SmartMatic:
                 deadline = loop.time() + timeout
 
                 report("checking_defaults", {}, 0.0)
-                # Exactly the official app's request.
+                # The plain status request, unnumbered.
                 command = await self._probe(
                     DEFAULT_COMMAND_CHAR, PROBE_TIMEOUT, sent, numbered=False
                 )
@@ -951,8 +967,8 @@ class SmartMatic:
     async def _set_time(self, char: str | None = None, *, pace: bool = True):
         """Push the current time to the device before reading status.
 
-        The official app sends this on every connect. Some devices (in
-        particular ones that were never set up through the official app)
+        Sent on every connect. Some devices (in particular ones that were
+        never provisioned)
         do not emit a usable status frame until their clock has been set
         at least once. A failure here is logged but not fatal: the status
         read that follows is the real success criterion.

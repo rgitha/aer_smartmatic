@@ -938,3 +938,131 @@ async def test_actions_stay_registered_without_loaded_devices(hass):
     await hass.async_block_till_done()
     # Registered once at integration load, not per device (action-setup).
     assert hass.services.has_service(DOMAIN, "update_status")
+
+
+async def test_device_entities_are_unavailable_while_not_heard(hass, caplog):
+    from test_devicestatus_frame import FRAME
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+    instance._on_notification(C1, FRAME)
+    await hass.async_block_till_done()
+
+    readings = ["sensor.hall_battery", "button.hall_spray_now", "button.hall_reset_refill_level",
+                "button.hall_identify", "select.hall_spray_auto"]
+    always = ["sensor.hall_status", "binary_sensor.hall_connection_status",
+              "button.hall_update_status"]
+    for entity_id in readings + always:
+        assert hass.states.get(entity_id).state != "unavailable", entity_id
+
+    caplog.clear()
+    instance.set_advertising(False)
+    instance.set_advertising(False)
+    await hass.async_block_till_done()
+    for entity_id in readings:
+        assert hass.states.get(entity_id).state == "unavailable", entity_id
+    for entity_id in always:
+        assert hass.states.get(entity_id).state != "unavailable", entity_id
+    assert caplog.text.count("no longer heard") == 1
+
+    instance.set_advertising(True)
+    instance.set_advertising(True)
+    await hass.async_block_till_done()
+    for entity_id in readings:
+        assert hass.states.get(entity_id).state != "unavailable", entity_id
+    assert caplog.text.count("heard again") == 1
+
+
+def advert(name="Smart Matic"):
+    return SimpleNamespace(address=MAC, name=name, rssi=-70)
+
+
+async def test_bluetooth_discovery_sets_up_after_confirming(hass):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
+    )
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
+    flow = hass.config_entries.flow.async_get(result["flow_id"])
+    assert flow["context"]["title_placeholders"] == {"name": "Smart Matic"}
+
+    detect = AsyncMock(side_effect=[None, (C4, C1)])
+    with patch(DETECT, detect), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result, _ = await finish_progress(hass, result)
+        # No reply: back to the confirmation, to try again.
+        assert result["step_id"] == "bluetooth_confirm"
+        assert result["errors"] == {"base": "no_reply"}
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result, _ = await finish_progress(hass, result)
+    assert result["step_id"] == "name"
+
+    with patch("custom_components.godrej_aer.async_setup_entry", AsyncMock(return_value=True)):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"name": "Hall"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["result"].unique_id == MAC.lower()
+
+
+async def test_bluetooth_discovery_of_a_configured_or_other_device_aborts(hass):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert("Other")
+    )
+    assert result["type"] is FlowResultType.ABORT and result["reason"] == "not_supported"
+
+    make_entry(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
+    )
+    assert result["type"] is FlowResultType.ABORT and result["reason"] == "already_configured"
+
+
+async def test_manual_mac_setup(hass):
+    result = await start_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": "manual_mac"})
+    assert result["step_id"] == "manual_mac"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": "not-a-mac"})
+    assert result["errors"] == {"base": "invalid_mac"}
+
+    detect = AsyncMock(side_effect=[RuntimeError("boom"), (C4, C1)])
+    with patch(DETECT, detect), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": MAC})
+        result, _ = await finish_progress(hass, result)
+        # An unexpected error: back to the address form, to try again.
+        assert result["step_id"] == "manual_mac" and result["errors"] == {"base": "unknown"}
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": MAC})
+        result, _ = await finish_progress(hass, result)
+    assert result["step_id"] == "name"
+
+
+async def test_configured_devices_are_not_listed(hass):
+    make_entry(hass)
+    other = SimpleNamespace(address="11:22:33:44:55:66", name="Phone")
+    with patch(f"{CF}.async_discovered_service_info",
+               return_value=[*discovered(), other]):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    schema = result["data_schema"].schema
+    options = next(iter(schema.values())).container
+    assert list(options) == ["manual_mac"]
+
+
+async def test_update_status_action_errors(hass):
+    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data
+    with patch.object(instance, "connect", AsyncMock(side_effect=DeviceConnectionError("gone"))):
+        with pytest.raises(HomeAssistantError) as err:
+            await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
+    assert err.value.translation_key == "update_failed"
+    assert err.value.translation_placeholders["count"] == "1"
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    with pytest.raises(ServiceValidationError) as err:
+        await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
+    assert err.value.translation_key == "no_devices_matched"

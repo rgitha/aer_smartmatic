@@ -66,15 +66,24 @@ class SmartMaticSensor(SensorEntity):
         if instance.device_status is not None:
             self._attr_native_value = self._value_fn(instance.device_status)
 
+    @property
+    def available(self) -> bool:
+        return self._instance.heard
+
     async def async_added_to_hass(self) -> None:
         self._instance.eventbus.add_listener(
             DEVICE_STATUS_UPDATE, self.on_status_update
         )
+        self._instance.eventbus.add_listener(DEVICE_REACHABILITY, self._on_reachability)
 
     async def async_will_remove_from_hass(self) -> None:
         self._instance.eventbus.remove_listener(
             DEVICE_STATUS_UPDATE, self.on_status_update
         )
+        self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
+
+    async def _on_reachability(self, _instance) -> None:
+        self.async_write_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:
