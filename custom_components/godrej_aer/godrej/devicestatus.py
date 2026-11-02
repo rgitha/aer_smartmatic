@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import struct
+from typing import Any
 from datetime import datetime, timedelta
 
 from . import cbor
@@ -37,20 +40,21 @@ _COUNTER_KEYS = {
 
 
 def _u16(data: bytes, offset: int) -> int:
-    return struct.unpack_from(">H", data, offset)[0]
+    value: int = struct.unpack_from(">H", data, offset)[0]
+    return value
 
 
 def _ascii(data: bytes, start: int, end: int) -> str:
     return data[start:end].decode("ascii", "replace").strip("\x00 ").strip()
 
 
-def _int_or_none(value):
+def _int_or_none(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return None
 
 
-def _str_or_none(value):
+def _str_or_none(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) else None
 
 
@@ -64,10 +68,10 @@ class DeviceStatus:
     def __init__(self, status_bytes: bytes):
         self.date = datetime.now()
         self.raw = bytes(status_bytes)
-        self.message_type = None
-        self.message_id = None
-        self.acknowledgement = None
-        self.spray_counts = {}
+        self.message_type: int | None = None
+        self.message_id: int | None = None
+        self.acknowledgement: int | None = None
+        self.spray_counts: dict[str, int] = {}
 
         try:
             message = cbor.loads(self.raw)
@@ -80,7 +84,7 @@ class DeviceStatus:
         else:
             self._from_fixed_offsets(self.raw)
 
-    def _from_message(self, message: dict):
+    def _from_message(self, message: dict[str, Any]) -> None:
         self.message_type = message.get("mT")
         self.message_id = message.get("mN")
         self.acknowledgement = message.get("ack")
@@ -100,7 +104,7 @@ class DeviceStatus:
         if not isinstance(counters, dict):
             return
 
-        counts = {}
+        counts: dict[str, int] = {}
         for array_key, names in _COUNTER_KEYS.items():
             values = counters.get(array_key)
             if not isinstance(values, list):
@@ -114,7 +118,7 @@ class DeviceStatus:
             self.spray_counts = counts
             self.total_spray_count = sum(counts.values())
 
-    def _from_fixed_offsets(self, status_bytes: bytes):
+    def _from_fixed_offsets(self, status_bytes: bytes) -> None:
         """Fallback for frames that are not valid CBOR."""
         if len(status_bytes) != STATUS_LEN or status_bytes[5] != STATUS_REPLY_MT:
             _LOGGER.debug(
@@ -173,12 +177,14 @@ class DeviceStatus:
     @property
     def spray_interval(self) -> int:
         """Auto-spray interval in minutes (0 when idle)."""
+        if self.current_status is None:
+            return 0
         return _INTERVAL_BY_STATUS.get(self.current_status, 0)
 
     @property
     def spray_source(self) -> str | None:
         """What started auto-spraying: "app", "schedule" or "button"."""
-        if not self.is_spraying:
+        if not self.is_spraying or self.current_status is None:
             return None
         return _SOURCE_BY_STATUS_GROUP.get(self.current_status // 10)
 
@@ -190,7 +196,7 @@ class DeviceStatus:
             mode = "auto off"
         c = self.spray_counts
 
-        def group(prefix):
+        def group(prefix: str) -> str:
             return "/".join(str(c.get(f"{prefix}_{m}", "?")) for m in (10, 20, 40))
 
         counts = (
@@ -217,6 +223,6 @@ class DeviceStatus:
         return round((SPRAY_CAPACITY - used) / SPRAY_CAPACITY * 100)
 
     @property
-    def is_valid(self):
+    def is_valid(self) -> bool:
         return self.battery_mv is not None and \
             datetime.now() < self.date + DEVICE_STATUS_VALIDITY_TIME

@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -29,7 +29,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-):
+) -> None:
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([SmartMaticAutoSpraySelect(instance, config_entry)])
 
@@ -80,7 +80,7 @@ class SmartMaticAutoSpraySelect(SelectEntity):
         )
         self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
 
-    async def _on_reachability(self, _instance) -> None:
+    async def _on_reachability(self, _instance: SmartMatic) -> None:
         self.async_write_ha_state()
 
     @property
@@ -128,6 +128,6 @@ class SmartMaticAutoSpraySelect(SelectEntity):
         self._attr_current_option = option
         self.async_write_ha_state()
 
-    async def on_status_update(self, device_status: DeviceStatus):
+    async def on_status_update(self, device_status: DeviceStatus) -> None:
         self._apply_status(device_status)
         self.async_write_ha_state()

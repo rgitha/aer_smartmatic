@@ -239,6 +239,13 @@ pip install pytest-homeassistant-custom-component
 pytest tests_ha
 ```
 
+The code is fully typed; check it in the Home Assistant environment with:
+
+```
+pip install mypy
+mypy --strict custom_components/godrej_aer
+```
+
 ## License
 
 Apache License 2.0.

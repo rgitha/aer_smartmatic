@@ -18,19 +18,25 @@ from homeassistant.const import (
     CONF_NAME,
     EntityCategory,
 )
-from homeassistant.core import callback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .entity import async_device_device_info_fn
 from .godrej import SmartMatic, DeviceStatus
+from .godrej.schedule import Schedule
 from .godrej.events import DEVICE_REACHABILITY, DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE
 
 
 # Commands to one device are serialised by the device code itself.
 PARALLEL_UPDATES = 0
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
         SmartMaticStatusSensor(instance, config_entry),
@@ -82,7 +88,7 @@ class SmartMaticSensor(SensorEntity):
         )
         self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
 
-    async def _on_reachability(self, _instance) -> None:
+    async def _on_reachability(self, _instance: SmartMatic) -> None:
         self.async_write_ha_state()
 
     @property
@@ -91,7 +97,7 @@ class SmartMaticSensor(SensorEntity):
             self._instance, self._config_entry.data[CONF_NAME]
         )
 
-    async def on_status_update(self, device_status: DeviceStatus):
+    async def on_status_update(self, device_status: DeviceStatus) -> None:
         self._attr_native_value = self._value_fn(device_status)
         self.async_write_ha_state()
 
@@ -133,7 +139,7 @@ class SmartMaticStatusSensor(SensorEntity):
         for event in (DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
             self._instance.eventbus.remove_listener(event, self._on_event)
 
-    async def _on_event(self, _data) -> None:
+    async def _on_event(self, _data: object) -> None:
         self.async_write_ha_state()
 
     @property
@@ -193,7 +199,9 @@ class SmartMaticChannelSensor(SensorEntity):
     # Only needed for troubleshooting: enable it on the device page.
     _attr_entity_registry_enabled_default = False
 
-    def __init__(self, instance, config_entry, key, uuid):
+    def __init__(
+        self, instance: SmartMatic, config_entry: ConfigEntry, key: str, uuid: str
+    ) -> None:
         self._instance = instance
         self._config_entry = config_entry
         self._attr_unique_id = f"{config_entry.entry_id}_{key}"
@@ -251,10 +259,14 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         )
 
     @callback
-    def _on_advertisement(self, info, change) -> None:
+    def _on_advertisement(
+        self,
+        info: bluetooth.BluetoothServiceInfoBleak,
+        change: bluetooth.BluetoothChange,
+    ) -> None:
         previous = self._attr_native_value
         if (
-            previous is not None
+            isinstance(previous, int)
             and info.source == (self._attr_extra_state_attributes or {}).get("source")
             and abs(info.rssi - previous) < self._MIN_CHANGE
             and time.monotonic() - self._last_write < self._MIN_INTERVAL
@@ -263,7 +275,7 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         self._update(info)
         self.async_write_ha_state()
 
-    def _update(self, info) -> None:
+    def _update(self, info: bluetooth.BluetoothServiceInfoBleak) -> None:
         scanner = bluetooth.async_scanner_by_source(self.hass, info.source)
         self._attr_native_value = info.rssi
         self._attr_extra_state_attributes = {
@@ -294,7 +306,7 @@ class SmartMaticSchedulesSensor(SensorEntity, RestoreEntity):
         self._attr_unique_id = f"{config_entry.entry_id}_schedules"
         self._update_from(instance.schedules)
 
-    def _update_from(self, schedules) -> None:
+    def _update_from(self, schedules: list[Schedule] | None) -> None:
         if schedules is None:
             self._attr_native_value = None
             self._attr_extra_state_attributes = {}
@@ -330,7 +342,7 @@ class SmartMaticSchedulesSensor(SensorEntity, RestoreEntity):
         for event in (DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE):
             self._instance.eventbus.remove_listener(event, self._on_update)
 
-    async def _on_update(self, _data) -> None:
+    async def _on_update(self, _data: object) -> None:
         if self._instance.schedules is None:
             return  # keep the restored list until the device is read
         self._update_from(self._instance.schedules)
@@ -368,7 +380,7 @@ class SmartMaticUpdatedLastSensor(SensorEntity):
     async def async_will_remove_from_hass(self) -> None:
         self._instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, self._on_update)
 
-    async def _on_update(self, _status) -> None:
+    async def _on_update(self, _status: object) -> None:
         self._attr_native_value = self._instance.last_update
         self.async_write_ha_state()
 

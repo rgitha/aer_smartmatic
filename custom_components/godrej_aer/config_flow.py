@@ -9,7 +9,9 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from collections.abc import Awaitable
+
+from homeassistant.config_entries import SOURCE_RECONFIGURE, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_MAC, CONF_NAME
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.components.bluetooth import (
@@ -30,21 +32,21 @@ _MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
 class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.name = "Godrej Aer Smart Matic"
-        self.mac = None
-        self.command_char = None
-        self.reply_char = None
+        self.mac: str = ""
+        self.command_char: str | None = None
+        self.reply_char: str | None = None
         self._manual_entry = False
         self._discovered = False
         self._smartmatic: SmartMatic | None = None
-        self._detect_task: asyncio.Task | None = None
+        self._detect_task: asyncio.Task[None] | None = None
         self._detect_error: str | None = None
-        self._stage: tuple[str, dict] = ("connecting", {})
+        self._stage: tuple[str, dict[str, str]] = ("connecting", {})
         self._stage_changed = asyncio.Event()
-        self._waiter: asyncio.Task | None = None
+        self._waiter: asyncio.Task[None] | None = None
 
-    def _is_device_supported(self, device_info):
+    def _is_device_supported(self, device_info: BluetoothServiceInfoBleak) -> bool:
         name = device_info.name or ""
         return "smart matic" in name.lower()
 
@@ -174,21 +176,23 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self._smartmatic = SmartMatic(self.hass, self.mac)
         return await self.async_step_detect()
 
-    def _on_progress(self, stage: str, details: dict, fraction: float) -> None:
+    def _on_progress(self, stage: str, details: dict[str, str], fraction: float) -> None:
         self._stage = (stage, details)
         self.async_update_progress(fraction)
         self._stage_changed.set()
 
     async def _run_detection(self) -> None:
+        smartmatic = self._smartmatic
+        assert smartmatic is not None  # set before detection starts
         try:
-            self._detect_error = await self._detect(self._smartmatic)
+            self._detect_error = await self._detect(smartmatic)
         finally:
-            if self._reconfigure_entry_id is None:
-                await self._smartmatic.disconnect()
+            if not self._reconfiguring:
+                await smartmatic.disconnect()
 
     @property
-    def _reconfigure_entry_id(self) -> str | None:
-        return self.context.get("entry_id") if self.source == "reconfigure" else None
+    def _reconfiguring(self) -> bool:
+        return self.source == SOURCE_RECONFIGURE
 
     async def async_step_detect(
         self, user_input: dict[str, Any] | None = None
@@ -222,7 +226,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         error = self._detect_error
         # Allow another attempt (e.g. after an error, from the form).
         self._detect_task = self._waiter = None
-        if self._reconfigure_entry_id is not None:
+        if self._reconfiguring:
             if error:
                 return await self.async_step_reconfigure(errors={"base": error})
             entry = self._get_reconfigure_entry()
@@ -307,7 +311,7 @@ def _short(uuid: str | None) -> str:
     return uuid[:8] if uuid else "not detected"
 
 
-async def _first_of(*aws) -> None:
+async def _first_of(*aws: Awaitable[object]) -> None:
     """Wait until any of the given awaitables finishes."""
     tasks = [asyncio.ensure_future(aw) for aw in aws]
     _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

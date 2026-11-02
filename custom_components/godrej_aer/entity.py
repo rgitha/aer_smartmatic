@@ -4,7 +4,7 @@ from collections.abc import Awaitable
 
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 
 from .const import DOMAIN
@@ -19,7 +19,7 @@ class AcceptedButFlat(HomeAssistantError):
     """The device took the command, but its batteries are too low to spray."""
 
 
-async def async_send_command(command: Awaitable[None]) -> None:
+async def async_send_command(command: Awaitable[object]) -> None:
     """Run a device command, turning failures into a translated HA error.
 
     The frontend shows it as a toast on the control that was used.

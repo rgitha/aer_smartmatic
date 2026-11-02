@@ -4,7 +4,7 @@ import logging
 
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_NAME, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -22,7 +22,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback
-):
+) -> None:
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
         SmartMaticSprayNowButton(instance, config_entry),
@@ -61,7 +61,7 @@ class SmartMaticDeviceButton(SmartMaticButton):
     async def async_will_remove_from_hass(self) -> None:
         self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
 
-    async def _on_reachability(self, _instance) -> None:
+    async def _on_reachability(self, _instance: SmartMatic) -> None:
         self.async_write_ha_state()
 
 

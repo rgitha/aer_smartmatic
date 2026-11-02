@@ -23,7 +23,7 @@ def loads(data: bytes) -> Any:
     return value
 
 
-def decode(data: bytes, offset: int = 0) -> tuple[Any, int]:
+def decode(data: bytes | memoryview, offset: int = 0) -> tuple[Any, int]:
     """Decode one CBOR item at ``offset``; return (value, next offset)."""
     value, end = _item(memoryview(data), offset)
     if value is _BREAK:
@@ -127,8 +127,8 @@ def _string(
         raise CBORError(f"invalid UTF-8 in text string: {e}") from e
 
 
-def _array(data: memoryview, offset: int, length: int | None) -> tuple[list, int]:
-    items = []
+def _array(data: memoryview, offset: int, length: int | None) -> tuple[list[Any], int]:
+    items: list[Any] = []
     if length is None:
         while True:
             value, offset = _item(data, offset)
@@ -141,8 +141,8 @@ def _array(data: memoryview, offset: int, length: int | None) -> tuple[list, int
     return items, offset
 
 
-def _map(data: memoryview, offset: int, length: int | None) -> tuple[dict, int]:
-    result = {}
+def _map(data: memoryview, offset: int, length: int | None) -> tuple[dict[Any, Any], int]:
+    result: dict[Any, Any] = {}
     count = 0
     while length is None or count < length:
         key, offset = _item(data, offset)

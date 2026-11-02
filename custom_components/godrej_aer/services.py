@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import voluptuous as vol
 
@@ -33,13 +35,13 @@ SCHEDULE_SERVICES = (
     SERVICE_STOP_SCHEDULE,
 )
 
-_SCHEDULE_FIELDS = {
+_SCHEDULE_FIELDS: dict[vol.Marker, Any] = {
     vol.Required("days"): vol.All(cv.ensure_list, [cv.string]),
     vol.Required("start"): cv.time,
     vol.Required("end"): cv.time,
     vol.Required("interval"): vol.All(vol.Coerce(int), vol.In(SPRAY_INTERVALS)),
 }
-_TARGET_KEYS = {
+_TARGET_KEYS: dict[vol.Marker, Any] = {
     vol.Optional("device_id"): vol.Any(cv.string, [cv.string]),
     vol.Optional("entity_id"): cv.comp_entity_ids,
     vol.Optional("area_id"): vol.Any(cv.string, [cv.string]),
@@ -65,7 +67,7 @@ SCHEDULE_TARGET_SCHEMA = vol.Schema({
 })
 
 
-def _schedule_from(data: dict) -> Schedule:
+def _schedule_from(data: dict[str, Any]) -> Schedule:
     try:
         return Schedule.create(data["days"], data["start"], data["end"], data["interval"])
     except ScheduleError as e:
@@ -78,10 +80,13 @@ async def _extract_config_entry_ids(hass: HomeAssistant, call: ServiceCall) -> s
     It took ``(hass, call)`` until HA 2025.x, then ``(call)``; the old form
     was removed in 2026.10.
     """
-    params = list(inspect.signature(async_extract_config_entry_ids).parameters)
+    extract: Any = async_extract_config_entry_ids
+    params = list(inspect.signature(extract).parameters)
     if params and params[0] == "hass":
-        return await async_extract_config_entry_ids(hass, call)
-    return await async_extract_config_entry_ids(call)
+        entry_ids: set[str] = await extract(hass, call)
+    else:
+        entry_ids = await extract(call)
+    return entry_ids
 
 
 async def _async_matched_instances(
@@ -158,7 +163,9 @@ def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN, SERVICE_UPDATE_STATUS, _async_update_status
     )
 
-    async def _for_each_device(call: ServiceCall, change) -> None:
+    async def _for_each_device(
+        call: ServiceCall, change: Callable[[SmartMatic], Awaitable[object]]
+    ) -> None:
         """Apply a schedule change to every targeted device, one by one."""
         instances = await _async_matched_instances(hass, call)
         _LOGGER.debug(

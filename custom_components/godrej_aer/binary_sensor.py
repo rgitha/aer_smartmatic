@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME
-from homeassistant.helpers.entity import EntityCategory, DeviceInfo
+from homeassistant.const import CONF_NAME, EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import async_device_device_info_fn
 from .godrej import SmartMatic
@@ -17,7 +19,11 @@ from .godrej.events import (
 # Commands to one device are serialised by the device code itself.
 PARALLEL_UPDATES = 0
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
         SmartMaticReachableBinarySensor(instance, config_entry),
@@ -46,7 +52,7 @@ class SmartMaticBinarySensor(BinarySensorEntity):
     def device_info(self) -> DeviceInfo:
         return async_device_device_info_fn(self._instance, self._config_entry.data[CONF_NAME])
 
-    async def on_event(self, _data) -> None:
+    async def on_event(self, _data: object) -> None:
         self.async_write_ha_state()
 
 
@@ -68,7 +74,7 @@ class SmartMaticReachableBinarySensor(SmartMaticBinarySensor):
         return self._instance.reachable
 
     @property
-    def extra_state_attributes(self) -> dict:
+    def extra_state_attributes(self) -> dict[str, str | None]:
         # An attribute rather than a timestamp sensor: attribute changes
         # don't add activity log entries.
         last = self._instance.last_update

@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import time
+from typing import Any
 
 from .const import SPRAY_INTERVALS
 
@@ -44,7 +46,9 @@ class Schedule:
     sprays: int  # sprays in the window
 
     @classmethod
-    def create(cls, days, start: time, end: time, interval: int) -> "Schedule":
+    def create(
+        cls, days: str | Iterable[str], start: time, end: time, interval: int
+    ) -> "Schedule":
         """Build a schedule from a start and end time, checking it fits.
 
         An end at or before the start means the next day (the device runs a
@@ -114,7 +118,7 @@ class Schedule:
                 out.append((0, end - _MINUTES_PER_WEEK))
         return out
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         """For entity attributes and logs."""
         return {
             "days": [_DAY_LABELS[d] for d in self.days],
@@ -150,7 +154,7 @@ def validate(schedules: list[Schedule]) -> None:
                 raise ScheduleError(f"Schedules overlap: {a} and {b}")
 
 
-def normalise_schedule_dict(item: dict) -> dict:
+def normalise_schedule_dict(item: dict[str, Any]) -> dict[str, Any]:
     """A schedule as given back by a caller (e.g. from the Schedules
     sensor's attributes) in ``Schedule.as_dict()`` form, for comparing."""
     return {
@@ -161,7 +165,7 @@ def normalise_schedule_dict(item: dict) -> dict:
     }
 
 
-def _normalise_days(days) -> tuple[str, ...]:
+def _normalise_days(days: str | Iterable[str]) -> tuple[str, ...]:
     if isinstance(days, str):
         days = [days]
     chosen: set[str] = set()

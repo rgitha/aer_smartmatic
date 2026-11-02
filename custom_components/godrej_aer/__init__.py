@@ -1,6 +1,6 @@
 """The Godrej Aer Smart Matic integration."""
 from __future__ import annotations
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -56,7 +56,7 @@ async def async_setup_entry(
     retry_timer = None
 
     @callback
-    def _cancel_retry_timer():
+    def _cancel_retry_timer() -> None:
         nonlocal retry_timer
         if retry_timer is not None:
             retry_timer()
@@ -64,14 +64,14 @@ async def async_setup_entry(
 
     entry.async_on_unload(_cancel_retry_timer)
 
-    async def _read_schedules():
+    async def _read_schedules() -> None:
         _LOGGER.debug("Reading the schedules of %s after startup", mac)
         try:
             await instance.read_schedules()
         except Exception:
             _LOGGER.debug("Could not read schedules from %s", mac, exc_info=True)
 
-    async def _on_first_status(_status) -> None:
+    async def _on_first_status(_status: object) -> None:
         # Read the device's own schedules once, after the first status
         # shows it is reachable; later changes read them back themselves.
         instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
@@ -85,7 +85,7 @@ async def async_setup_entry(
         lambda: instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
     )
 
-    async def _connect_if_needed():
+    async def _connect_if_needed() -> None:
         nonlocal retry_timer
         if bluetooth.async_address_present(hass, mac, connectable=True):
             try:
@@ -100,14 +100,14 @@ async def async_setup_entry(
                     retry_timer = async_call_later(hass, delay + 0.5, _retry_now)
 
     @callback
-    def _retry_now(_now) -> None:
+    def _retry_now(_now: datetime) -> None:
         nonlocal retry_timer
         retry_timer = None
         _LOGGER.debug("Retrying %s after the backoff", mac)
         _schedule_connect()
 
     @callback
-    def _schedule_connect():
+    def _schedule_connect() -> None:
         # Don't delay startup; cancelled on unload.
         entry.async_create_background_task(
             hass, _connect_if_needed(), f"godrej_aer connect {mac}"
@@ -117,7 +117,7 @@ async def async_setup_entry(
     def _async_discovered_device(
         service_info: bluetooth.BluetoothServiceInfoBleak,
         change: bluetooth.BluetoothChange
-    ):
+    ) -> None:
         """Subscribe to bluetooth changes."""
         instance.set_advertising(True)
         _schedule_connect()
@@ -153,7 +153,7 @@ async def async_setup_entry(
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     @callback
-    def _async_periodic_connect(_now):
+    def _async_periodic_connect(_now: datetime) -> None:
         _schedule_connect()
 
     entry.async_on_unload(
