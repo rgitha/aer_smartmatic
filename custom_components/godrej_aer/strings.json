@@ -112,12 +112,14 @@
   "entity": {
     "binary_sensor": {
       "bluetooth_link": {
+        "name": "Connection link",
         "state": {
           "on": "Active",
           "off": "Idle"
         }
       },
       "status": {
+        "name": "Connection status",
         "state": {
           "on": "OK",
           "off": "Unreachable"
@@ -126,12 +128,53 @@
     },
     "sensor": {
       "device_status": {
+        "name": "Status",
         "state": {
           "idle": "Idle",
           "auto": "Auto",
           "schedule": "Schedule",
           "disconnected": "Disconnected"
         }
+      },
+      "battery_level": {
+        "name": "Battery"
+      },
+      "battery_voltage": {
+        "name": "Battery voltage"
+      },
+      "refill_level": {
+        "name": "Refill level"
+      },
+      "spray_count": {
+        "name": "Spray count"
+      },
+      "command_channel": {
+        "name": "Channel: command"
+      },
+      "reply_channel": {
+        "name": "Channel: reply"
+      },
+      "signal_strength": {
+        "name": "Signal strength"
+      },
+      "updated_last": {
+        "name": "Updated last"
+      }
+    },
+    "button": {
+      "spray_now": {
+        "name": "Spray now"
+      },
+      "reset_refill": {
+        "name": "Reset refill level"
+      },
+      "update_status": {
+        "name": "Update status"
+      }
+    },
+    "select": {
+      "spray_mode": {
+        "name": "Spray: auto"
       }
     }
   },

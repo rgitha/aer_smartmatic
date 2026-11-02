@@ -14,6 +14,8 @@ from .godrej import SmartMatic
 
 
 _LOGGER = logging.getLogger(__name__)
+# Commands to one device are serialised by the device code itself.
+PARALLEL_UPDATES = 0
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -49,8 +51,7 @@ class SmartMaticSprayNowButton(SmartMaticButton):
     """Spray once, now."""
 
     _key = "trigger"
-    _attr_name = "Spray now"
-    _attr_icon = "mdi:spray"
+    _attr_translation_key = "spray_now"
 
     async def async_press(self) -> None:
         _LOGGER.debug("%s: Spray now pressed", self._config_entry.data[CONF_NAME])
@@ -61,8 +62,7 @@ class SmartMaticResetRefillButton(SmartMaticButton):
     """Tell the device its cartridge has been refilled."""
 
     _key = "reset_refill"
-    _attr_name = "Reset refill level"
-    _attr_icon = "mdi:cup-water"
+    _attr_translation_key = "reset_refill"
     # Its own card on the device page, away from the everyday controls.
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -75,8 +75,7 @@ class SmartMaticUpdateStatusButton(SmartMaticButton):
     """Read the status and schedules now, like the Update status action."""
 
     _key = "update_status"
-    _attr_name = "Update status"
-    _attr_icon = "mdi:refresh"
+    _attr_translation_key = "update_status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     async def async_press(self) -> None:
@@ -95,7 +94,6 @@ class SmartMaticIdentifyButton(SmartMaticButton):
     standard identify button: the type only sets its icon and name)."""
 
     _key = "identify"
-    _attr_name = "Identify"
     _attr_device_class = ButtonDeviceClass.IDENTIFY
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 

@@ -8,18 +8,21 @@ from homeassistant.const import Platform, CONF_MAC
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth.match import ADDRESS, BluetoothCallbackMatcher
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR
 from .const import DOMAIN
 from .godrej import SmartMatic
 from .godrej.events import DEVICE_STATUS_UPDATE
-from .services import async_setup_services, async_unload_services
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 # Replaced by the "Spray: auto" select (Off / every 10, 20 or 40 min).
 _REPLACED_ENTITIES = (("switch", "auto_spray"), ("select", "spray_interval"))
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
@@ -27,6 +30,12 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.SELECT,
 ]
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions, once."""
+    async_setup_services(hass)
+    return True
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -43,8 +52,6 @@ async def async_setup_entry(
         reply_char=entry.data.get(CONF_REPLY_CHAR),
     )
     entry.runtime_data = instance
-
-    async_setup_services(hass)
 
     retry_timer = None
 
@@ -163,7 +170,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         instance: SmartMatic = entry.runtime_data
         await instance.disconnect()
-        async_unload_services(hass, entry)
     return unload_ok
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

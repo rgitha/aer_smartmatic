@@ -7,7 +7,7 @@ import logging
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
@@ -198,23 +198,4 @@ def async_setup_services(hass: HomeAssistant) -> None:
         (SERVICE_CLEAR_SCHEDULES, _async_clear_schedules, CLEAR_SCHEDULES_SCHEMA),
     ):
         hass.services.async_register(DOMAIN, name, handler, schema=schema)
-
-
-@callback
-def async_unload_services(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Remove services once the last config entry is being unloaded.
-
-    ``entry`` is the entry currently unloading; it may still report as
-    LOADED here, so it is excluded from the check.
-    """
-
-    if any(
-        other.entry_id != entry.entry_id
-        and other.state is ConfigEntryState.LOADED
-        for other in hass.config_entries.async_entries(DOMAIN)
-    ):
-        return
-
-    for name in (SERVICE_UPDATE_STATUS, *SCHEDULE_SERVICES):
-        hass.services.async_remove(DOMAIN, name)
 

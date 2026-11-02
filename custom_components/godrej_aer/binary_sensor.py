@@ -14,6 +14,9 @@ from .godrej.events import (
     DEVICE_STATUS_UPDATE,
 )
 
+# Commands to one device are serialised by the device code itself.
+PARALLEL_UPDATES = 0
+
 async def async_setup_entry(hass, config_entry, async_add_entities):
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
@@ -54,7 +57,6 @@ class SmartMaticReachableBinarySensor(SmartMaticBinarySensor):
     """
 
     _events = (DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE)
-    _attr_name = "Connection status"
     _attr_translation_key = "status"
 
     def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
@@ -64,10 +66,6 @@ class SmartMaticReachableBinarySensor(SmartMaticBinarySensor):
     @property
     def is_on(self) -> bool | None:
         return self._instance.reachable
-
-    @property
-    def icon(self) -> str:
-        return "mdi:check-circle-outline" if self.is_on is not False else "mdi:alert-circle-outline"
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -85,7 +83,6 @@ class SmartMaticBluetoothLinkBinarySensor(SmartMaticBinarySensor):
     """
 
     _events = (DEVICE_CONNECT, DEVICE_DISCONNECT)
-    _attr_name = "Connection link"
     _attr_translation_key = "bluetooth_link"
     _attr_entity_registry_enabled_default = False
 
@@ -98,6 +95,3 @@ class SmartMaticBluetoothLinkBinarySensor(SmartMaticBinarySensor):
         client = self._instance.client
         return bool(client and client.is_connected)
 
-    @property
-    def icon(self) -> str:
-        return "mdi:bluetooth-connect" if self.is_on else "mdi:bluetooth"

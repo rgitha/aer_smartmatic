@@ -1,0 +1,56 @@
+{
+  "entity": {
+    "sensor": {
+      "device_status": {
+        "default": "mdi:spray-bottle",
+        "state": {
+          "auto": "mdi:spray",
+          "schedule": "mdi:spray",
+          "disconnected": "mdi:link-variant-off"
+        }
+      },
+      "refill_level": {
+        "default": "mdi:cup-water"
+      },
+      "spray_count": {
+        "default": "mdi:counter"
+      },
+      "command_channel": {
+        "default": "mdi:bluetooth-settings"
+      },
+      "reply_channel": {
+        "default": "mdi:bluetooth-settings"
+      }
+    },
+    "button": {
+      "spray_now": {
+        "default": "mdi:spray"
+      },
+      "reset_refill": {
+        "default": "mdi:cup-water"
+      },
+      "update_status": {
+        "default": "mdi:refresh"
+      }
+    },
+    "binary_sensor": {
+      "status": {
+        "default": "mdi:check-circle-outline",
+        "state": {
+          "off": "mdi:alert-circle-outline"
+        }
+      },
+      "bluetooth_link": {
+        "default": "mdi:bluetooth",
+        "state": {
+          "on": "mdi:bluetooth-connect"
+        }
+      }
+    },
+    "select": {
+      "spray_mode": {
+        "default": "mdi:spray"
+      }
+    }
+  }
+}

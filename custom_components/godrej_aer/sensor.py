@@ -27,6 +27,9 @@ from .godrej import SmartMatic, DeviceStatus
 from .godrej.events import DEVICE_REACHABILITY, DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE
 
 
+# Commands to one device are serialised by the device code itself.
+PARALLEL_UPDATES = 0
+
 async def async_setup_entry(hass, config_entry, async_add_entities):
     instance: SmartMatic = config_entry.runtime_data
     async_add_entities([
@@ -37,11 +40,11 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         SmartMaticSprayCountSensor(instance, config_entry),
         SmartMaticChannelSensor(
             instance, config_entry, "command_channel",
-            "Channel: command", instance.command_char,
+            instance.command_char,
         ),
         SmartMaticChannelSensor(
             instance, config_entry, "reply_channel",
-            "Channel: reply", instance.reply_char,
+            instance.reply_char,
         ),
         SmartMaticSignalStrengthSensor(instance, config_entry),
         SmartMaticSchedulesSensor(instance, config_entry),
@@ -93,7 +96,6 @@ class SmartMaticStatusSensor(SensorEntity):
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Status"
     _attr_translation_key = "device_status"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ["idle", "auto", "schedule", "disconnected"]
@@ -113,16 +115,6 @@ class SmartMaticStatusSensor(SensorEntity):
         if not status.is_spraying:
             return "idle"
         return "schedule" if status.spray_source == "schedule" else "auto"
-
-    @property
-    def icon(self) -> str:
-        # Spray while spraying, the bottle alone while idle, a broken link
-        # when disconnected (for any reason, not only Bluetooth).
-        return {
-            "auto": "mdi:spray",
-            "schedule": "mdi:spray",
-            "disconnected": "mdi:link-variant-off",
-        }.get(self.native_value, "mdi:spray-bottle")
 
     async def async_added_to_hass(self) -> None:
         for event in (DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
@@ -146,7 +138,7 @@ class SmartMaticBatterySensor(SmartMaticSensor):
     """Estimated battery level (linear in the voltage; see const.py)."""
 
     _key = "battery_level"
-    _attr_name = "Battery"
+    _attr_translation_key = "battery_level"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -157,7 +149,7 @@ class SmartMaticBatteryVoltageSensor(SmartMaticSensor):
     """The measured voltage the battery level is estimated from."""
 
     _key = "battery_voltage"
-    _attr_name = "Battery voltage"
+    _attr_translation_key = "battery_voltage"
     _attr_device_class = SensorDeviceClass.VOLTAGE
     _attr_native_unit_of_measurement = UnitOfElectricPotential.MILLIVOLT
     _attr_suggested_display_precision = 0
@@ -170,18 +162,16 @@ class SmartMaticBatteryVoltageSensor(SmartMaticSensor):
 
 class SmartMaticRefillLevelSensor(SmartMaticSensor):
     _key = "refill_level"
-    _attr_name = "Refill level"
+    _attr_translation_key = "refill_level"
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:cup-water"
     _value_fn = staticmethod(lambda status: status.refill_percent)
 
 
 class SmartMaticSprayCountSensor(SmartMaticSensor):
     _key = "spray_count"
-    _attr_name = "Spray count"
+    _attr_translation_key = "spray_count"
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
-    _attr_icon = "mdi:counter"
     _value_fn = staticmethod(lambda status: status.total_spray_count)
 
 
@@ -190,16 +180,15 @@ class SmartMaticChannelSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:bluetooth-settings"
     _attr_should_poll = False
     # Only needed for troubleshooting: enable it on the device page.
     _attr_entity_registry_enabled_default = False
 
-    def __init__(self, instance, config_entry, key, name, uuid):
+    def __init__(self, instance, config_entry, key, uuid):
         self._instance = instance
         self._config_entry = config_entry
         self._attr_unique_id = f"{config_entry.entry_id}_{key}"
-        self._attr_name = name
+        self._attr_translation_key = key
         self._attr_native_value = uuid[:8] if uuid else "not detected"
         self._attr_extra_state_attributes = {"uuid": uuid}
 
@@ -214,7 +203,7 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
     """RSSI of the device's advertisements, and which adapter or proxy heard them."""
 
     _attr_has_entity_name = True
-    _attr_name = "Signal strength"
+    _attr_translation_key = "signal_strength"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
@@ -352,7 +341,7 @@ class SmartMaticUpdatedLastSensor(SensorEntity):
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Updated last"
+    _attr_translation_key = "updated_last"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False

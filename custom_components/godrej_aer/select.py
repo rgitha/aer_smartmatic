@@ -22,6 +22,8 @@ _OPTION_BY_INTERVAL = {minutes: option for option, minutes in _INTERVAL_BY_OPTIO
 
 
 _LOGGER = logging.getLogger(__name__)
+# Commands to one device are serialised by the device code itself.
+PARALLEL_UPDATES = 0
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -41,14 +43,13 @@ class SmartMaticAutoSpraySelect(SelectEntity):
     cycle with a spray. Off is always sent (it also clears the lights).
     """
 
-    _attr_icon = "mdi:spray"
+    _attr_translation_key = "spray_mode"
     _attr_options = [OFF, *_INTERVAL_BY_OPTION]
 
     def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
         self._instance = instance
         self._config_entry = config_entry
         self._attr_has_entity_name = True
-        self._attr_name = "Spray: auto"
         self._attr_unique_id = f"{config_entry.entry_id}_spray_mode"
         self._apply_status(instance.device_status)
 

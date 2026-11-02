@@ -16,6 +16,7 @@ This integration currently supports the following features:
 - Connection status (diagnostic): OK, or Unreachable when the device isn't heard or the last exchange failed
 - Updated last (diagnostic): when the last status was read; the Update status button reads it now
 - On-demand status refresh via the `godrej_aer.update_status` service
+- Diagnostics download (device page, ⋮ → Download diagnostics), with the address and name redacted
 
 ## Services
 

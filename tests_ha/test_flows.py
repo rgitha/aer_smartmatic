@@ -908,3 +908,33 @@ async def test_schedules_are_restored_after_a_restart(hass):
     assert state.attributes["schedules"] == listed
     assert state.attributes["running"] is None  # not known until read again
     assert state.attributes["last_read"] == "2026-11-01T08:00:00+00:00"
+
+
+async def test_diagnostics_report(hass):
+    from custom_components.godrej_aer.diagnostics import async_get_config_entry_diagnostics
+    from test_devicestatus_frame import FRAME
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    entry.runtime_data._on_notification(C1, FRAME)
+    await hass.async_block_till_done()
+    with patch("homeassistant.components.bluetooth.async_last_service_info", return_value=None):
+        report = await async_get_config_entry_diagnostics(hass, entry)
+    assert report["entry"]["data"]["mac"] == "**REDACTED**"
+    assert report["entry"]["data"]["name"] == "**REDACTED**"
+    assert report["entry"]["title"] == "**REDACTED**"
+    assert MAC not in str(report) and MAC.lower() not in str(report)
+    assert report["channels"] == {"command": C4, "reply": C1}
+    assert report["status"]["mode_code"] == 114 and report["status"]["spray_interval"] == 40
+    assert report["status"]["battery_mv"] and report["status"]["raw"]
+    assert set(report["connection"]) >= {"reachable", "advertising", "last_exchange_ok", "poll_failures"}
+
+
+async def test_actions_stay_registered_without_loaded_devices(hass):
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    assert hass.services.has_service(DOMAIN, "update_status")
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    # Registered once at integration load, not per device (action-setup).
+    assert hass.services.has_service(DOMAIN, "update_status")
