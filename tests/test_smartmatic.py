@@ -1195,6 +1195,17 @@ async def test_schedules_are_empty_once_remove_all_is_acknowledged(monkeypatch):
     assert matic.schedules == []
 
 
+async def test_saving_schedules_reads_the_status_back(monkeypatch):
+    # Saving stops a running schedule, so the status is read again after.
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    refresh = []
+    monkeypatch.setattr(matic, "_schedule_refresh", lambda: refresh.append(1))
+    await matic.set_schedules([sched("daily", "16:00", "23:00", 20)])
+    assert refresh == [1]
+
+
 async def test_clearing_schedules_skips_the_upload(monkeypatch):
     monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
     device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)

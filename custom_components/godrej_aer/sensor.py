@@ -238,12 +238,23 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         self._last_write = 0.0
 
     @property
+    def available(self) -> bool:
+        # A reading from before the device went quiet would be misleading.
+        return self._instance.heard
+
+    @property
     def device_info(self) -> DeviceInfo:
         return async_device_device_info_fn(
             self._instance, self._config_entry.data[CONF_NAME]
         )
 
     async def async_added_to_hass(self) -> None:
+        self._instance.eventbus.add_listener(DEVICE_REACHABILITY, self._on_reachability)
+        self.async_on_remove(
+            lambda: self._instance.eventbus.remove_listener(
+                DEVICE_REACHABILITY, self._on_reachability
+            )
+        )
         mac = self._instance.mac
         info = bluetooth.async_last_service_info(self.hass, mac, connectable=True)
         if info is not None:
@@ -273,6 +284,9 @@ class SmartMaticSignalStrengthSensor(SensorEntity):
         ):
             return
         self._update(info)
+        self.async_write_ha_state()
+
+    async def _on_reachability(self, _instance: SmartMatic) -> None:
         self.async_write_ha_state()
 
     def _update(self, info: bluetooth.BluetoothServiceInfoBleak) -> None:
@@ -335,17 +349,21 @@ class SmartMaticSchedulesSensor(SensorEntity, RestoreEntity):
                     "running": None,
                     "last_read": last.attributes.get("last_read"),
                 }
-        for event in (DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE):
+        for event in (DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
             self._instance.eventbus.add_listener(event, self._on_update)
 
     async def async_will_remove_from_hass(self) -> None:
-        for event in (DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE):
+        for event in (DEVICE_SCHEDULES_UPDATE, DEVICE_STATUS_UPDATE, DEVICE_REACHABILITY):
             self._instance.eventbus.remove_listener(event, self._on_update)
 
+    @property
+    def available(self) -> bool:
+        return self._instance.heard
+
     async def _on_update(self, _data: object) -> None:
-        if self._instance.schedules is None:
-            return  # keep the restored list until the device is read
-        self._update_from(self._instance.schedules)
+        # Until the device is read, keep the restored list.
+        if self._instance.schedules is not None:
+            self._update_from(self._instance.schedules)
         self.async_write_ha_state()
 
     @property

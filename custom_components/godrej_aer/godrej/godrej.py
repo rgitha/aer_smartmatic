@@ -488,6 +488,10 @@ class SmartMatic:
         finally:
             if not done:
                 await self.read_schedules_quietly()
+            # Removing the schedules stops a running one until its next
+            # start (the device only starts schedules at their start time),
+            # so read the status back to show that.
+            self._schedule_refresh()
         if stored is None:
             # The device took the upload but will not list it back:
             # ``schedules`` keeps the acknowledged list.

@@ -970,9 +970,10 @@ async def test_device_entities_are_unavailable_while_not_heard(hass, caplog):
     await hass.async_block_till_done()
 
     readings = ["sensor.hall_battery", "button.hall_spray_now", "button.hall_reset_refill_level",
-                "button.hall_identify", "select.hall_spray_auto"]
+                "button.hall_identify", "select.hall_spray_auto", "sensor.hall_schedules",
+                "sensor.hall_signal_strength", "button.hall_update_status"]
     always = ["sensor.hall_status", "binary_sensor.hall_connection_status",
-              "button.hall_update_status"]
+              "sensor.hall_updated_last"]
     for entity_id in readings + always:
         assert hass.states.get(entity_id).state != "unavailable", entity_id
 

@@ -89,7 +89,7 @@ class SmartMaticResetRefillButton(SmartMaticDeviceButton):
         await async_send_command(self._instance.reset_refill())
 
 
-class SmartMaticUpdateStatusButton(SmartMaticButton):
+class SmartMaticUpdateStatusButton(SmartMaticDeviceButton):
     """Read the status and schedules now, like the Update status action."""
 
     _key = "update_status"
