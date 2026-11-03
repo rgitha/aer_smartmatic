@@ -60,6 +60,16 @@ async def async_get_config_entry_diagnostics(
             "poll_failures": instance._poll_failures,
             "retry_in_seconds": instance.retry_delay,
         },
+        "schedules": None if instance.schedules is None else {
+            "list": [
+                {**schedule.as_dict(), "sprays": schedule.sprays, "raw": schedule.to_bytes().hex()}
+                for schedule in instance.schedules
+            ],
+            "running": instance.running_schedule(),
+            "read_at": (
+                instance.schedules_read_at.isoformat() if instance.schedules_read_at else None
+            ),
+        },
         "advertisement": None if info is None else {
             "rssi": info.rssi,
             "source": info.source,

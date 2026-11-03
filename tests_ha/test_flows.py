@@ -928,6 +928,17 @@ async def test_diagnostics_report(hass):
     assert report["status"]["mode_code"] == 114 and report["status"]["spray_interval"] == 40
     assert report["status"]["battery_mv"] and report["status"]["raw"]
     assert set(report["connection"]) >= {"reachable", "advertising", "last_exchange_ok", "poll_failures"}
+    assert report["schedules"] is None  # not read yet
+
+    from custom_components.godrej_aer.godrej.schedule import Schedule
+    from datetime import time
+    instance = entry.runtime_data
+    instance.schedules = [Schedule.create(["mon"], time(8), time(10), 20)]
+    with patch("homeassistant.components.bluetooth.async_last_service_info", return_value=None):
+        report = await async_get_config_entry_diagnostics(hass, entry)
+    listed = report["schedules"]["list"][0]
+    assert (listed["start"], listed["end"], listed["sprays"]) == ("08:00", "10:00", 6)
+    assert listed["raw"] and report["schedules"]["running"] is None
 
 
 async def test_actions_stay_registered_without_loaded_devices(hass):
