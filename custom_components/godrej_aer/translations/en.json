@@ -30,12 +30,6 @@
                     "mac": "MAC Address"
                 }
             },
-            "name": {
-                "title": "Name Device",
-                "data": {
-                    "name": "Name"
-                }
-            },
             "reconfigure": {
                 "title": "Check the connection",
                 "description": "Connect to the device again and check how it communicates, for example after a firmware update."

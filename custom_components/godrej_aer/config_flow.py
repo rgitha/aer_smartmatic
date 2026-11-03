@@ -255,7 +255,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
             if self._manual_entry:
                 return await self.async_step_manual_mac(errors={"base": error})
             return await self.async_step_user(errors={"base": error})
-        return await self.async_step_name()
+        return self._create_entry()
 
     def async_remove(self) -> None:
         """Stop detection if the dialog is closed while it runs."""
@@ -280,33 +280,20 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="reconfigure", errors=errors or {})
 
+    def _create_entry(self) -> ConfigFlowResult:
+        """Add the device under its advertised name.
 
-    async def async_step_name(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle name step."""
-        if user_input is not None:
-            self.name = user_input[CONF_NAME]
-
-            return self.async_create_entry(
-                title=self.name,
-                data = {
-                    CONF_MAC: self.mac,
-                    CONF_NAME: self.name,
-                    CONF_COMMAND_CHAR: self.command_char,
-                    CONF_REPLY_CHAR: self.reply_char,
-                }
-            )
-
-        return self.async_show_form(
-            step_id="name",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_NAME, default=self.name): str
-                }
-            ),
-            errors={},
+        Home Assistant's own dialog follows, to rename it and pick an area."""
+        return self.async_create_entry(
+            title=self.name,
+            data={
+                CONF_MAC: self.mac,
+                CONF_NAME: self.name,
+                CONF_COMMAND_CHAR: self.command_char,
+                CONF_REPLY_CHAR: self.reply_char,
+            },
         )
+
 
 async def _first_of(*aws: Awaitable[object]) -> None:
     """Wait until any of the given awaitables finishes."""

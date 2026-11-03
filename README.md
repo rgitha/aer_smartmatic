@@ -84,7 +84,9 @@ yourself, choose **Add integration → Godrej Aer Smart Matic**.
 |---|---|---|
 | Select device | Device | A Smart Matic that Home Assistant can hear, or **Enter MAC address manually**. |
 | Enter MAC address | MAC address | The device's Bluetooth address, e.g. `AA:BB:CC:DD:EE:FF`. |
-| Name device | Name | The device and entity name prefix, e.g. Hall. |
+
+Home Assistant then checks that the device responds and adds it as "Smart
+Matic". In the dialog that follows, give it a name (e.g. Hall) and an area.
 
 There are no other options. If the device stops answering after a firmware
 update, use **Reconfigure** on the integration entry.
