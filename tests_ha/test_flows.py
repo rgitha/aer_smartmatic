@@ -994,6 +994,8 @@ async def test_bluetooth_discovery_sets_up_after_confirming(hass):
         DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
     )
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
+    # Every placeholder the step's title and text use must be given.
+    assert result["description_placeholders"] == {"name": "Smart Matic", "address": MAC}
     flow = hass.config_entries.flow.async_get(result["flow_id"])
     assert flow["context"]["title_placeholders"] == {"name": "Smart Matic"}
 

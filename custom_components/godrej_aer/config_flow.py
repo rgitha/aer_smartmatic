@@ -39,6 +39,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self.reply_char: str | None = None
         self._manual_entry = False
         self._discovered = False
+        self._discovered_name = "Smart Matic"
         self._smartmatic: SmartMatic | None = None
         self._detect_task: asyncio.Task[None] | None = None
         self._detect_error: str | None = None
@@ -120,7 +121,8 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
         self.mac = discovery_info.address
         self._discovered = True
-        self.context["title_placeholders"] = {"name": discovery_info.name}
+        self._discovered_name = discovery_info.name or "Smart Matic"
+        self.context["title_placeholders"] = {"name": self._discovered_name}
         return await self.async_step_bluetooth_confirm()
 
     async def async_step_bluetooth_confirm(
@@ -134,7 +136,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self._set_confirm_only()
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            description_placeholders={"address": self.mac},
+            description_placeholders={"name": self._discovered_name, "address": self.mac},
             errors=errors or {},
         )
 
