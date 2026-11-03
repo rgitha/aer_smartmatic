@@ -10,7 +10,7 @@
       },
       "bluetooth_confirm": {
         "title": "Set up {name}",
-        "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to find its channels."
+        "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to check that it responds."
       },
       "manual_mac": {
         "title": "Enter MAC Address",
@@ -22,12 +22,11 @@
         "title": "Name Device",
         "data": {
           "name": "Name"
-        },
-        "description": "Detected command channel {command} and reply channel {reply}."
+        }
       },
       "reconfigure": {
-        "title": "Detect channels",
-        "description": "Detect the device's command and reply channels again, for example after a firmware update."
+        "title": "Check the connection",
+        "description": "Connect to the device again and check how it communicates, for example after a firmware update."
       }
     },
     "error": {
@@ -39,14 +38,14 @@
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
-      "channels_detected": "Detected command channel {command} and reply channel {reply}.",
+      "channels_detected": "The device responded, and its settings are saved.",
       "not_supported": "This is not a supported Smart Matic device"
     },
     "progress": {
       "connecting": "Connecting to the device…",
-      "checking_defaults": "Checking the default channels…",
-      "probing": "Checking channel {index} of {total} ({channel})…",
-      "probing_again": "Setting the clock and checking channel {index} of {total} ({channel}) again…"
+      "checking_defaults": "Checking that the device responds…",
+      "probing": "Trying connection option {index} of {total}…",
+      "probing_again": "Setting the clock and trying connection option {index} of {total} again…"
     }
   },
   "services": {

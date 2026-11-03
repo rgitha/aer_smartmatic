@@ -26,6 +26,8 @@ from .godrej.exception import InvalidDeviceError, ConnectionError
 _LOGGER = logging.getLogger(__name__)
 
 MANUAL_MAC = "manual_mac"
+# The name devices advertise; the default device name.
+DEFAULT_NAME = "Smart Matic"
 _MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
 
 
@@ -33,13 +35,14 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
-        self.name = "Godrej Aer Smart Matic"
+        self.name = DEFAULT_NAME
+        self._listed_names: dict[str, str] = {}
         self.mac: str = ""
         self.command_char: str | None = None
         self.reply_char: str | None = None
         self._manual_entry = False
         self._discovered = False
-        self._discovered_name = "Smart Matic"
+        self._discovered_name = DEFAULT_NAME
         self._smartmatic: SmartMatic | None = None
         self._detect_task: asyncio.Task[None] | None = None
         self._detect_error: str | None = None
@@ -80,6 +83,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
 
             self._manual_entry = False
             self.mac = user_input[CONF_MAC]
+            self.name = self._listed_names.get(self.mac) or DEFAULT_NAME
             await self.async_set_unique_id(format_mac(self.mac), raise_on_progress=False)
             self._abort_if_unique_id_configured()
             return await self.async_step_validate()
@@ -97,6 +101,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             discovered_devices.append(device_info)
 
+        self._listed_names = {dev.address: dev.name for dev in discovered_devices if dev.name}
         device_options = {dev.address: f"{dev.name} ({dev.address})" for dev in discovered_devices}
         device_options[MANUAL_MAC] = "Enter MAC address manually"
 
@@ -121,7 +126,8 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
         self.mac = discovery_info.address
         self._discovered = True
-        self._discovered_name = discovery_info.name or "Smart Matic"
+        self._discovered_name = discovery_info.name or DEFAULT_NAME
+        self.name = self._discovered_name
         self.context["title_placeholders"] = {"name": self._discovered_name}
         return await self.async_step_bluetooth_confirm()
 
@@ -241,10 +247,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                 },
             )
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
-            return self.async_abort(
-                reason="channels_detected",
-                description_placeholders=self._channel_placeholders(),
-            )
+            return self.async_abort(reason="channels_detected")
 
         if error:
             if self._discovered:
@@ -253,9 +256,6 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_manual_mac(errors={"base": error})
             return await self.async_step_user(errors={"base": error})
         return await self.async_step_name()
-
-    def _channel_placeholders(self) -> dict[str, str]:
-        return {"command": _short(self.command_char), "reply": _short(self.reply_char)}
 
     def async_remove(self) -> None:
         """Stop detection if the dialog is closed while it runs."""
@@ -305,13 +305,8 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_NAME, default=self.name): str
                 }
             ),
-            description_placeholders=self._channel_placeholders(),
             errors={},
         )
-
-def _short(uuid: str | None) -> str:
-    return uuid[:8] if uuid else "not detected"
-
 
 async def _first_of(*aws: Awaitable[object]) -> None:
     """Wait until any of the given awaitables finishes."""

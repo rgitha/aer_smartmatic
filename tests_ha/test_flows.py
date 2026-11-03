@@ -72,7 +72,9 @@ async def test_setup_stores_detected_channels(hass):
     result = await pick_device(hass, result, detect)
     detect.assert_awaited_once()
     assert result["step_id"] == "name"
-    assert result["description_placeholders"] == {"command": "6e400004", "reply": "6e400001"}
+    assert not result.get("description_placeholders")  # no channel details
+    schema = result["data_schema"].schema
+    assert next(iter(schema)).default() == "Smart Matic"  # the advertised name
 
     with patch("custom_components.godrej_aer.async_setup_entry", AsyncMock(return_value=True)):
         result = await hass.config_entries.flow.async_configure(
@@ -175,7 +177,7 @@ async def test_reconfigure_finishes_with_the_detected_channels(hass):
         result, _ = await finish_progress(hass, result)
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "channels_detected"
-    assert result["description_placeholders"] == {"command": "6e400003", "reply": "6e400001"}
+    assert not result.get("description_placeholders")
 
 
 async def test_reconfigure_without_reply_changes_nothing(hass):
@@ -579,7 +581,7 @@ async def test_setup_with_frontend_refreshes(hass):
         )
     assert invalid == []
     assert last["type"] is FlowResultType.FORM and last["step_id"] == "name"
-    assert last["description_placeholders"] == {"command": "6e400004", "reply": "6e400001"}
+    assert not last.get("description_placeholders")
 
 
 async def test_battery_is_shown_as_a_percentage(hass):
