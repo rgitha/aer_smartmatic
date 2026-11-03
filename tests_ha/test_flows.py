@@ -941,6 +941,15 @@ async def test_diagnostics_report(hass):
     assert listed["raw"] and report["schedules"]["running"] is None
 
 
+async def test_deleting_a_device_offers_it_again(hass):
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    with patch("custom_components.godrej_aer.bluetooth.async_rediscover_address") as again:
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+    again.assert_called_once_with(hass, MAC)
+
+
 async def test_actions_stay_registered_without_loaded_devices(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)

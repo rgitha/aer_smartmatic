@@ -172,6 +172,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await instance.disconnect()
     return unload_ok
 
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Let Home Assistant offer the device again straight away.
+
+    Otherwise it is offered only after a restart or a gap in its
+    advertisements, whichever way the entry was added."""
+    bluetooth.async_rediscover_address(hass, entry.data[CONF_MAC])
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update."""
     _LOGGER.debug("Config entry %s updated", entry.entry_id)

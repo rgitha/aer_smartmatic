@@ -120,6 +120,10 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> ConfigFlowResult:
         """Offer a device Home Assistant heard advertising."""
+        _LOGGER.debug(
+            "Discovered %s (%s) via %s",
+            discovery_info.name, discovery_info.address, getattr(discovery_info, "source", "?"),
+        )
         await self.async_set_unique_id(format_mac(discovery_info.address))
         self._abort_if_unique_id_configured()
         if not self._is_device_supported(discovery_info):
