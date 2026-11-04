@@ -56,6 +56,10 @@ SCHEDULE_START_READS = (30, 60, 90)
 # After this many failed attempts in a row while the device is still
 # heard, warn that the adapter or proxy may need a restart.
 STUCK_AFTER = 3
+# A failed attempt counts towards that only if the device advertised within
+# this many seconds: Home Assistant takes minutes to notice a device that
+# went quiet (batteries out, moved away), and that isn't the proxy's fault.
+HEARD_RECENTLY = 30
 # Seconds to wait after connecting before sending a button command.
 # Polls wait 2 s.
 ACTION_SETTLE = 0.5

@@ -1,6 +1,8 @@
 """SmartMatic against simulated devices for each known firmware variant."""
 import asyncio
 import functools
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -752,11 +754,18 @@ async def test_a_second_press_joins_the_attempt(monkeypatch):
     matic._link_task.cancel()
 
 
+def advertised(monkeypatch, seconds_ago):
+    """The last advertisement Home Assistant has from the device."""
+    info = SimpleNamespace(time=time.monotonic() - seconds_ago, source="AA:BB:CC:DD:EE:FF")
+    monkeypatch.setattr(gm, "async_last_service_info", lambda hass, mac, connectable=True: info)
+
+
 async def test_repeated_failures_while_heard_warn_once(monkeypatch, caplog):
     device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
     matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
     monkeypatch.setattr(gm, "STUCK_AFTER", 2)
     matic.set_advertising(True)
+    advertised(monkeypatch, 2)
     caplog.set_level("WARNING", logger=gm.__name__)
 
     async def refused(*args, **kwargs):
@@ -769,6 +778,27 @@ async def test_repeated_failures_while_heard_warn_once(monkeypatch, caplog):
         await asyncio.sleep(0)
     warnings = [r.message for r in caplog.records if "restart that adapter or proxy" in r.message]
     assert len(warnings) == 1
+
+
+async def test_no_stuck_warning_for_a_device_that_went_quiet(monkeypatch, caplog):
+    """Home Assistant still counts it as heard for a few minutes after its
+    last advertisement; failures then are not the proxy's fault."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "STUCK_AFTER", 2)
+    matic.set_advertising(True)
+    advertised(monkeypatch, 120)
+    caplog.set_level("WARNING", logger=gm.__name__)
+
+    async def refused(*args, **kwargs):
+        raise Exception("Timeout waiting for connect response")
+
+    monkeypatch.setattr(gm, "establish_connection", refused)
+    for _ in range(3):
+        with pytest.raises(DeviceConnectionError):
+            await matic.spray_now()
+        await asyncio.sleep(0)
+    assert not [r for r in caplog.records if "restart that adapter or proxy" in r.message]
 
 
 async def test_press_during_a_failing_poll_fails_with_it(monkeypatch):

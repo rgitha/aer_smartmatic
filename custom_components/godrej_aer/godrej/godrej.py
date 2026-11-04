@@ -34,6 +34,7 @@ from .const import (
     CONNECT_TIMEOUT,
     SCHEDULE_START_READS,
     STUCK_AFTER,
+    HEARD_RECENTLY,
     CONNECT_RETRY_BACKOFF,
     MAIN_SVC,
     NOTIFY_CHAR,
@@ -819,13 +820,14 @@ class SmartMatic:
 
     def _note_link_failure(self) -> None:
         """Count failed attempts while the device is heard; warn once."""
-        if not self.heard:
+        info = async_last_service_info(self.hass, self.mac, connectable=True)
+        seen = getattr(info, "time", None)
+        if not self.heard or seen is None or time.monotonic() - seen > HEARD_RECENTLY:
             self._link_failures = 0
             return
         self._link_failures += 1
         if self._link_failures != STUCK_AFTER:
             return
-        info = async_last_service_info(self.hass, self.mac, connectable=True)
         scanner = async_scanner_by_source(self.hass, info.source) if info else None
         via = getattr(scanner, "name", None) or (info.source if info else "the Bluetooth adapter")
         _LOGGER.warning(

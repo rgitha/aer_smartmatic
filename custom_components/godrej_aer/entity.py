@@ -17,12 +17,17 @@ from .godrej.exception import (
 
 
 def device_name(hass: HomeAssistant, instance: SmartMatic) -> str:
-    """The device's name as the user sees it (renamed or not)."""
-    device = dr.async_get(hass).async_get_device(
-        connections={(CONNECTION_BLUETOOTH, instance.mac)}
-    )
-    if device is not None:
-        return device.name_by_user or device.name or instance.mac
+    """The device's name as the user sees it (renamed or not).
+
+    Found through its config entry, which has the one device: looking it
+    up by its Bluetooth connection is deprecated (Home Assistant 2026.8),
+    and this works on older versions too.
+    """
+    registry = dr.async_get(hass)
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if getattr(entry, "runtime_data", None) is instance:
+            for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+                return device.name_by_user or device.name or instance.mac
     return instance.mac
 
 
