@@ -39,12 +39,19 @@ SCHEDULE_PAUSE = 3
 # Fresh links answer in ~0.1 s; on a link left open for a few seconds the
 # device has been seen to take just over 3 s.
 ACK_TIMEOUT = 5
-# Every connection (presses, polls, setup) makes one attempt of at most
-# this many seconds; a working device connects in about 1 s. This keeps
-# press feedback quick even when a poll is connecting at the same time.
-# (bleak-retry-connector's own default is 4 attempts of up to 20 s.)
+# One connection attempt runs at a time, and the integration never cuts it
+# short: bleak-retry-connector's own timeout ends a failing one. Someone
+# waiting (a press, Update status) gets an answer after CONNECT_TIMEOUT
+# seconds; the attempt carries on, a press meanwhile joins it, and a link
+# that comes up after everyone stopped waiting is closed. A working device
+# connects in about 1 s.
 CONNECT_ATTEMPTS = 1
 CONNECT_TIMEOUT = 5
+# Background reads, which nobody is waiting on, wait for the whole attempt.
+BACKGROUND_PURPOSES = ("status poll", "read-back")
+# After this many failed attempts in a row while the device is still
+# heard, warn that the adapter or proxy may need a restart.
+STUCK_AFTER = 3
 # Seconds to wait after connecting before sending a button command.
 # Polls wait 2 s.
 ACTION_SETTLE = 0.5

@@ -628,27 +628,147 @@ async def test_press_gives_up_connecting_after_the_time_limit(monkeypatch, caplo
         await matic.spray_now()
     assert loop.time() - start < 1
     assert matic.reachable is False
-    assert any("(command): timed out after 0.1 s" in r.message for r in caplog.records)
+    assert any("(command): no connection within 0.1 s" in r.message for r in caplog.records)
 
 
-async def test_poll_connect_is_limited_too(monkeypatch):
+async def test_poll_waits_for_the_whole_attempt(monkeypatch):
+    """Nobody waits on a background read: it lets the library end the
+    attempt instead of cutting it short."""
     device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
     matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
-    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.1)
-    never = asyncio.Event()
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
     calls = []
 
-    async def hang(*args, max_attempts=None, **kwargs):
+    async def library_gives_up(*args, max_attempts=None, **kwargs):
         calls.append(max_attempts)
-        await never.wait()
+        await asyncio.wait_for(asyncio.Event().wait(), 0.3)  # its own timeout
 
-    monkeypatch.setattr(gm, "establish_connection", hang)
+    monkeypatch.setattr(gm, "establish_connection", library_gives_up)
     loop = asyncio.get_running_loop()
     start = loop.time()
     with pytest.raises(DeviceConnectionError):
         await matic.connect_if_needed()
-    assert loop.time() - start < 1
+    assert 0.25 < loop.time() - start < 1
     assert calls == [1]
+
+
+async def test_press_gives_up_but_the_attempt_carries_on(monkeypatch):
+    """The press answers quickly; the attempt isn't cancelled, and a link
+    that comes up after nobody is waiting is closed, without the command."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
+    connect = gm.establish_connection
+    release = asyncio.Event()
+    cancelled = []
+    clients = []
+
+    async def late(*args, **kwargs):
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        client = await connect(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(gm, "establish_connection", late)
+    with pytest.raises(DeviceConnectionError):
+        await matic.spray_now()
+    attempt = matic._link_task
+    assert attempt is not None and not attempt.done()  # still trying
+
+    release.set()
+    await attempt
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not cancelled
+    assert clients and not clients[0].is_connected  # the late link was closed
+    assert matic.client is None
+    assert gm.SPRAY_NOW_MSG not in [p for _, p in device.writes]  # not sent late
+
+
+async def test_a_press_during_a_slow_background_read_answers_quickly(monkeypatch):
+    """The background read waits for the link without holding the lock, so
+    a press joins the same attempt and still answers within its limit."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
+    never = asyncio.Event()
+    calls = []
+
+    async def hang(*args, **kwargs):
+        calls.append(1)
+        await never.wait()
+
+    monkeypatch.setattr(gm, "establish_connection", hang)
+    poll = asyncio.ensure_future(matic.connect_if_needed())
+    await asyncio.sleep(0)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    with pytest.raises(DeviceConnectionError):
+        await matic.spray_now()
+    assert loop.time() - start < 0.5
+    assert calls == [1]  # joined, not a second attempt
+    poll.cancel()
+    matic._link_task.cancel()
+
+
+async def test_unloading_ends_an_attempt_in_flight(monkeypatch):
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
+    never = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        await never.wait()
+
+    monkeypatch.setattr(gm, "establish_connection", hang)
+    with pytest.raises(DeviceConnectionError):
+        await matic.spray_now()
+    attempt = matic._link_task
+    await matic.disconnect()
+    await asyncio.sleep(0)
+    assert attempt.cancelled()
+
+
+async def test_a_second_press_joins_the_attempt(monkeypatch):
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
+    never = asyncio.Event()
+    calls = []
+
+    async def hang(*args, **kwargs):
+        calls.append(1)
+        await never.wait()
+
+    monkeypatch.setattr(gm, "establish_connection", hang)
+    for _ in range(2):
+        with pytest.raises(DeviceConnectionError):
+            await matic.spray_now()
+    assert calls == [1]  # one attempt, joined by the second press
+    matic._link_task.cancel()
+
+
+async def test_repeated_failures_while_heard_warn_once(monkeypatch, caplog):
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    monkeypatch.setattr(gm, "STUCK_AFTER", 2)
+    matic.set_advertising(True)
+    caplog.set_level("WARNING", logger=gm.__name__)
+
+    async def refused(*args, **kwargs):
+        raise Exception("Timeout waiting for connect response")
+
+    monkeypatch.setattr(gm, "establish_connection", refused)
+    for _ in range(3):
+        with pytest.raises(DeviceConnectionError):
+            await matic.spray_now()
+        await asyncio.sleep(0)
+    warnings = [r.message for r in caplog.records if "restart that adapter or proxy" in r.message]
+    assert len(warnings) == 1
 
 
 async def test_press_during_a_failing_poll_fails_with_it(monkeypatch):

@@ -223,8 +223,10 @@ automation:
 - **A command shows an error:** the device didn't confirm it within 5 seconds.
   The status is read back afterwards, so the entities show what the device is
   actually doing.
-- **The proxy seems stuck:** ESPHome Bluetooth proxies sometimes hang on a
-  connection. Restart the proxy.
+- **The proxy seems stuck:** an ESPHome Bluetooth proxy can get into a state
+  where it still hears the device but can't connect to it; every attempt
+  times out. The log then warns that the device "is heard but can't be
+  connected to". Restart the proxy.
 - **Reporting a problem:** attach the diagnostics download, and a debug log
   (on the integration page, ⋮ → Enable debug logging).
 

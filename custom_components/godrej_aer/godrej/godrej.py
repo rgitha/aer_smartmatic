@@ -12,7 +12,9 @@ from bleak.backends.service import BleakGATTService
 from bleak_retry_connector import establish_connection
 
 from homeassistant.components.bluetooth import (
-    async_ble_device_from_address
+    async_ble_device_from_address,
+    async_last_service_info,
+    async_scanner_by_source,
 )
 from homeassistant.util import dt as dt_util
 
@@ -27,8 +29,10 @@ from .const import (
     DETECT_TIMEOUT,
     ACK_TIMEOUT,
     BATTERY_CUTOFF_MV,
+    BACKGROUND_PURPOSES,
     CONNECT_ATTEMPTS,
     CONNECT_TIMEOUT,
+    STUCK_AFTER,
     CONNECT_RETRY_BACKOFF,
     MAIN_SVC,
     NOTIFY_CHAR,
@@ -261,6 +265,10 @@ class SmartMatic:
         # Loop time of the last failed connect, so queued commands give up
         # at once instead of each waiting out their own attempts.
         self._connect_failed_at: float | None = None
+        # The one connection attempt in flight, shared by everyone waiting.
+        self._link_task: asyncio.Task[BleakClient] | None = None
+        self._link_waiters = 0
+        self._link_failures = 0  # in a row, while heard
         self._refresh_task: asyncio.Task[None] | None = None
         # Reachability: off only on real trouble, not on the normal
         # disconnect after each exchange.
@@ -334,8 +342,18 @@ class SmartMatic:
         """
         current = self._status_read
         if current is not None and not current.done():
-            # e.g. Update status during a background read: share its result.
-            return await asyncio.shield(current)
+            # e.g. Update status during a background read: share its result,
+            # but someone waiting still gets an answer as quickly as usual.
+            if purpose in BACKGROUND_PURPOSES:
+                return await asyncio.shield(current)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(current), CONNECT_TIMEOUT + status_timeout
+                )
+            except TimeoutError as e:
+                raise ConnectionError(
+                    f"Failed to connect to device: still connecting to {self.mac}"
+                ) from e
         read = asyncio.get_running_loop().create_future()
         # Mark a failure as seen even if nobody else was waiting for it.
         read.add_done_callback(lambda f: f.cancelled() or f.exception())
@@ -593,8 +611,7 @@ class SmartMatic:
 
     async def _open_connection(
         self, *, subscribe: bool = True, settle: float = 2.0,
-        max_attempts: int | None = None, connect_timeout: float | None = None,
-        purpose: str = "status poll",
+        max_attempts: int | None = None, purpose: str = "status poll",
     ) -> None:
         """Establish the BLE link and (by default) subscribe to notifications.
 
@@ -619,27 +636,33 @@ class SmartMatic:
                 f"Device {self.mac} is not currently available over Bluetooth"
             )
 
-        _LOGGER.debug("Connecting to %s...", self.mac)
+        wait = None if purpose in BACKGROUND_PURPOSES else CONNECT_TIMEOUT
+        task = self._link(device, max_attempts)
+        # Wait without the lock, so that a background read waiting for a
+        # slow attempt doesn't hold up a press; the press joins the attempt.
+        self._link_waiters += 1
+        self._connect_lock.release()
         try:
-            # bleak-retry-connector allows 20 s per attempt; a working
-            # device connects in about 1 s, so give up much sooner.
-            async with asyncio.timeout(connect_timeout or CONNECT_TIMEOUT):
-                client = await establish_connection(
-                    BleakClient,
-                    device,
-                    self.mac,
-                    disconnected_callback=self._on_disconnect,
-                    max_attempts=max_attempts or CONNECT_ATTEMPTS,
-                )
+            client = await asyncio.wait_for(asyncio.shield(task), wait)
         except Exception as e:
             self._connect_failed_at = asyncio.get_running_loop().time()
-            if isinstance(e, TimeoutError):
-                reason = f"timed out after {connect_timeout or CONNECT_TIMEOUT} s"
+            if isinstance(e, TimeoutError) and wait is not None and not task.done():
+                reason = f"no connection within {wait:g} s"  # still trying
+            elif isinstance(e, TimeoutError):
+                reason = "the connection attempt timed out"
             else:
                 reason = str(e) or type(e).__name__
             _LOGGER.debug("Failed to connect to %s (%s): %s", self.mac, purpose, reason)
             raise ConnectionError(f"Failed to connect to device: {reason}") from e
+        finally:
+            self._link_waiters -= 1
+            await self._connect_lock.acquire()
 
+        if self.client is client and client.is_connected:
+            # Another waiter took the link while this one waited for the lock.
+            if subscribe:
+                await self._ensure_subscribed()
+            return
         self.client = client
         self._subscribed = False
 
@@ -679,6 +702,68 @@ class SmartMatic:
             # cancelled mid-connect we still must not leak the BLE link.
             await self._cleanup_connection()
             raise
+
+    def _link(self, device: Any, max_attempts: int | None) -> asyncio.Task[BleakClient]:
+        """The connection attempt in flight, starting one if there is none.
+
+        Callers wait on it (shielded) for as long as they can. The
+        integration never cancels it: the library's own timeout ends it.
+        """
+        task = self._link_task
+        if task is None or task.done():
+            _LOGGER.debug("Connecting to %s...", self.mac)
+            task = asyncio.get_running_loop().create_task(
+                self._link_attempt(device, max_attempts)
+            )
+            task.add_done_callback(self._on_link_done)
+            self._link_task = task
+        else:
+            _LOGGER.debug("Joining the connection attempt to %s in progress", self.mac)
+        return task
+
+    async def _link_attempt(self, device: Any, max_attempts: int | None) -> BleakClient:
+        client: BleakClient = await establish_connection(
+            BleakClient,
+            device,
+            self.mac,
+            disconnected_callback=self._on_disconnect,
+            max_attempts=max_attempts or CONNECT_ATTEMPTS,
+        )
+        return client
+
+    def _on_link_done(self, task: asyncio.Task[BleakClient]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            _LOGGER.debug("Connection attempt to %s ended without a link: %r", self.mac, error)
+            self._note_link_failure()
+            return
+        if self._link_failures >= STUCK_AFTER:
+            _LOGGER.info("%s can be connected to again", self.mac)
+        self._link_failures = 0
+        # This runs before the waiters resume, so a waiter still counts. If
+        # everyone has stopped waiting, nobody will use the link: close it.
+        if self._link_waiters == 0:
+            _LOGGER.debug("Connected to %s after everyone stopped waiting; closing", self.mac)
+            asyncio.get_running_loop().create_task(task.result().disconnect())
+
+    def _note_link_failure(self) -> None:
+        """Count failed attempts while the device is heard; warn once."""
+        if not self.heard:
+            self._link_failures = 0
+            return
+        self._link_failures += 1
+        if self._link_failures != STUCK_AFTER:
+            return
+        info = async_last_service_info(self.hass, self.mac, connectable=True)
+        scanner = async_scanner_by_source(self.hass, info.source) if info else None
+        via = getattr(scanner, "name", None) or (info.source if info else "the Bluetooth adapter")
+        _LOGGER.warning(
+            "%s is heard but can't be connected to (%d attempts in a row) through %s; "
+            "if this continues, restart that adapter or proxy",
+            self.mac, self._link_failures, via,
+        )
 
     async def _subscribe_notifications(
         self, client: BleakClient, main_svc: BleakGATTService
@@ -927,6 +1012,10 @@ class SmartMatic:
             task.cancel()
 
     async def disconnect(self) -> bool:
+        # Unloading: an attempt still in flight is ended here, so nothing
+        # is left running.
+        if self._link_task is not None and not self._link_task.done():
+            self._link_task.cancel()
         async with self._connect_lock:
             self._cancel_delayed_disconnect()
             self._cancel_refresh()

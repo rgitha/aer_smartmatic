@@ -21,6 +21,8 @@ def load_driver():
     stubs["bleak"].BleakClient = Mock
     stubs["bleak_retry_connector"].establish_connection = AsyncMock()
     stubs["homeassistant.components.bluetooth"].async_ble_device_from_address = Mock()
+    stubs["homeassistant.components.bluetooth"].async_last_service_info = Mock(return_value=None)
+    stubs["homeassistant.components.bluetooth"].async_scanner_by_source = Mock(return_value=None)
     stubs["homeassistant.util"].dt = SimpleNamespace()
     stubs["homeassistant.exceptions"].HomeAssistantError = type(
         "HomeAssistantError", (Exception,), {})
