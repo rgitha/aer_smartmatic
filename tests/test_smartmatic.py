@@ -1361,6 +1361,42 @@ async def test_the_idle_disconnect_keeps_watching_for_a_schedule_start(monkeypat
     assert watch.cancelled()
 
 
+async def test_a_failed_update_status_counts_as_a_failed_exchange(monkeypatch):
+    """Like a failed command: Connection status shows it, and the
+    background check retries instead of waiting for the hourly read."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert matic._last_exchange_ok is True
+
+    async def refused(*args, **kwargs):
+        raise Exception("Timeout waiting for connect response")
+
+    await matic.disconnect()
+    monkeypatch.setattr(gm, "establish_connection", refused)
+    with pytest.raises(DeviceConnectionError):
+        await matic.connect(purpose="update status")
+    assert matic._last_exchange_ok is False
+
+
+async def test_schedules_are_read_again_after_a_failed_read(monkeypatch):
+    """A schedule read that goes unanswered is tried again after the next
+    successful status read, not left until the next save or restart."""
+    monkeypatch.setattr(gm, "SCHEDULE_REPLY_TIMEOUT", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, lists_schedules=False)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert await matic.read_schedules_quietly() is None
+    assert matic._schedules_stale
+
+    device.lists_schedules = True
+    matic.device_status = None  # due for a background read
+    assert await matic.connect_if_needed()
+    await matic._stale_read
+    assert not matic._schedules_stale
+    assert matic.schedules == []
+
+
 async def test_clearing_schedules_skips_the_upload(monkeypatch):
     monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
     device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)

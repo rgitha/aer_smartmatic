@@ -239,6 +239,10 @@ class SmartMatic:
         # Held for a whole schedule read-modify-write, so two edits cannot
         # read the same list and then overwrite each other.
         self._schedules_lock = asyncio.Lock()
+        # The last schedule read failed: read them again after the next
+        # successful status read.
+        self._schedules_stale = False
+        self._stale_read: asyncio.Task[None] | None = None
         self._device_status_event = asyncio.Event()
         self._disconnect_task: asyncio.Task[None] | None = None
         self._retry_after: datetime | None = None
@@ -367,6 +371,11 @@ class SmartMatic:
             raise
         except BaseException as e:
             read.set_exception(e)
+            # Someone asked (Update status): like a failed command, show it
+            # in Connection status and let the background check retry.
+            # A failed background read is counted in connect_if_needed.
+            if isinstance(e, Exception) and purpose not in BACKGROUND_PURPOSES:
+                self._set_exchange_ok(False)
             raise
         read.set_result(result)
         return result
@@ -418,16 +427,21 @@ class SmartMatic:
     async def read_schedules(self) -> list[Schedule]:
         """Read the schedules stored on the device."""
         _LOGGER.debug("Asking %s for its schedules", self.mac)
-        reply = await self._write_action(
-            RETRIEVE_SCHEDULES_MSG, 159, timeout=SCHEDULE_REPLY_TIMEOUT, refresh=False
-        )
-        entries = []
         try:
-            message = cbor.loads(reply.raw)
-            for item in message.get("S") or []:
-                entries.append(Schedule.from_bytes(bytes(item["s"])))
-        except (cbor.CBORError, KeyError, TypeError, ScheduleError) as e:
-            raise ConnectionError(f"Unreadable schedule list from {self.mac}: {e}") from e
+            reply = await self._write_action(
+                RETRIEVE_SCHEDULES_MSG, 159, timeout=SCHEDULE_REPLY_TIMEOUT, refresh=False
+            )
+            entries = []
+            try:
+                message = cbor.loads(reply.raw)
+                for item in message.get("S") or []:
+                    entries.append(Schedule.from_bytes(bytes(item["s"])))
+            except (cbor.CBORError, KeyError, TypeError, ScheduleError) as e:
+                raise ConnectionError(f"Unreadable schedule list from {self.mac}: {e}") from e
+        except Exception:
+            self._schedules_stale = True
+            raise
+        self._schedules_stale = False
         _LOGGER.debug(
             "Schedules on %s: %s", self.mac, "; ".join(map(str, entries)) or "none"
         )
@@ -453,6 +467,20 @@ class SmartMatic:
             _LOGGER.warning("Could not read the schedules of %s: %s", self.mac, e)
             _LOGGER.debug("Schedule read for %s failed", self.mac, exc_info=True)
             return None
+
+    def _reread_schedules_if_stale(self) -> None:
+        """After a successful status read: if the last schedule read
+        failed, read the schedules again in the background."""
+        if not self._schedules_stale or (self._stale_read and not self._stale_read.done()):
+            return
+
+        async def _read() -> None:
+            async with self._schedules_lock:
+                if self._schedules_stale:  # a save may have read them meanwhile
+                    _LOGGER.debug("Reading the schedules of %s again: the last read failed", self.mac)
+                    await self.read_schedules_quietly()
+
+        self._stale_read = asyncio.get_running_loop().create_task(_read())
 
     async def set_schedules(
         self, schedules: list[Schedule], expected: list[dict[str, Any]] | None = None
@@ -975,6 +1003,7 @@ class SmartMatic:
         if self._failure_logged:
             _LOGGER.info("Status from %s is available again", self.mac)
             self._failure_logged = False
+        self._reread_schedules_if_stale()
         return True
 
     async def detect_channels(
@@ -1062,6 +1091,8 @@ class SmartMatic:
             self._link_task.cancel()
         if self._start_watch is not None:
             self._start_watch.cancel()
+        if self._stale_read is not None:
+            self._stale_read.cancel()
         await self.disconnect()
 
     async def disconnect(self) -> bool:
@@ -1394,6 +1425,8 @@ class SmartMatic:
                         "Status refresh after action on %s failed: %s", self.mac, e
                     )
                     await self.delayed_disconnect()
+                    return
+            self._reread_schedules_if_stale()
 
         self._refresh_task = asyncio.get_running_loop().create_task(_refresh())
 

@@ -110,10 +110,12 @@ The device doesn't push changes, so the integration reads its status:
 - when you press **Update status** or call the action.
 
 The schedules are read once after startup, after every schedule change and
-with Update status.
+with Update status. If a schedule read goes unanswered, they're read again
+after the next successful status read.
 
 To save battery, it disconnects after each exchange, so the link opening and
-closing is normal. After a failed read it retries after 30 s, 1, 2 and 5
+closing is normal. After a failed read, command or Update status, it reads
+again within a minute; if that fails too, it retries after 30 s, 1, 2 and 5
 minutes, then every 5 minutes until the device answers.
 
 When Home Assistant hasn't heard the device's advertisements for a few minutes
