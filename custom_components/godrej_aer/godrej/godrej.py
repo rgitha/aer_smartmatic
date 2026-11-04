@@ -1052,13 +1052,19 @@ class SmartMatic:
         if task is not None and task is not asyncio.current_task():
             task.cancel()
 
-    async def disconnect(self) -> bool:
-        # Unloading: an attempt still in flight is ended here, so nothing
-        # is left running.
+    async def shutdown(self) -> None:
+        """Unloading: stop everything still running, then disconnect.
+
+        Only here: the idle disconnect after each exchange must not stop
+        a connection attempt in flight or the status reads after a save.
+        """
         if self._link_task is not None and not self._link_task.done():
             self._link_task.cancel()
         if self._start_watch is not None:
             self._start_watch.cancel()
+        await self.disconnect()
+
+    async def disconnect(self) -> bool:
         async with self._connect_lock:
             self._cancel_delayed_disconnect()
             self._cancel_refresh()

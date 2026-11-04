@@ -728,7 +728,7 @@ async def test_unloading_ends_an_attempt_in_flight(monkeypatch):
     with pytest.raises(DeviceConnectionError):
         await matic.spray_now()
     attempt = matic._link_task
-    await matic.disconnect()
+    await matic.shutdown()
     await asyncio.sleep(0)
     assert attempt.cancelled()
 
@@ -1344,6 +1344,21 @@ async def test_saving_a_schedule_covering_now_watches_for_its_start(monkeypatch)
     later = sched([day], f"{(now.hour + 3) % 24:02d}:00", f"{(now.hour + 4) % 24:02d}:00", 20)
     await matic.set_schedules([later])
     assert watched == []  # nothing will start: no follow-up reads
+
+
+async def test_the_idle_disconnect_keeps_watching_for_a_schedule_start(monkeypatch):
+    """The routine disconnect after an exchange (about 15 s after a save)
+    must not stop the reads at 30, 60 and 90 s; unloading does."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    matic._watch_schedule_start()
+    watch = matic._start_watch
+    await matic.disconnect()
+    await asyncio.sleep(0)
+    assert not watch.done()
+    await matic.shutdown()
+    await asyncio.sleep(0)
+    assert watch.cancelled()
 
 
 async def test_clearing_schedules_skips_the_upload(monkeypatch):
