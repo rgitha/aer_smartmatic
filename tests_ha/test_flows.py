@@ -800,8 +800,14 @@ async def test_update_status_button(hass):
         await call(hass, "button", "press", button)
     connect.assert_awaited_once()
     read.assert_awaited_once()
+    from homeassistant.exceptions import HomeAssistantError
+
     with patch.object(instance, "connect", AsyncMock(side_effect=DeviceConnectionError("x"))):
-        await expect_unconfirmed(hass, "button", "press", button, key="cannot_reach")
+        with pytest.raises(HomeAssistantError) as err:
+            await call(hass, "button", "press", button)
+    # The same error as the action, naming the device.
+    assert err.value.translation_key == "update_failed"
+    assert err.value.translation_placeholders == {"names": "Hall"}
 
 
 async def test_updated_last_sensor(hass):

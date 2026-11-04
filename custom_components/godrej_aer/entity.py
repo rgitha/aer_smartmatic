@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 
@@ -13,6 +14,25 @@ from .godrej.exception import (
     BatteryTooLow, CommandNotConfirmed, ConnectionError, NotIdle, SchedulesChanged,
     SchedulesNotStored,
 )
+
+
+def device_name(hass: HomeAssistant, instance: SmartMatic) -> str:
+    """The device's name as the user sees it (renamed or not)."""
+    device = dr.async_get(hass).async_get_device(
+        connections={(CONNECTION_BLUETOOTH, instance.mac)}
+    )
+    if device is not None:
+        return device.name_by_user or device.name or instance.mac
+    return instance.mac
+
+
+def update_failed(names: str) -> HomeAssistantError:
+    """Update status failed: "Couldn't reach <names>. ..." """
+    return HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key="update_failed",
+        translation_placeholders={"names": names},
+    )
 
 
 class AcceptedButFlat(HomeAssistantError):

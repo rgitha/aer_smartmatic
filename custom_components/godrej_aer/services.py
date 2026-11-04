@@ -13,11 +13,10 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.service import async_extract_config_entry_ids
 
 from .const import DOMAIN
-from .entity import async_send_command
+from .entity import async_send_command, device_name, update_failed
 from .godrej import SmartMatic
 from .godrej.const import SPRAY_INTERVALS
 from .godrej.schedule import Schedule, ScheduleError
@@ -113,16 +112,6 @@ async def _async_matched_instances(
     return instances
 
 
-def _device_name(hass: HomeAssistant, instance: SmartMatic) -> str:
-    """The device's name as the user sees it (renamed or not)."""
-    device = dr.async_get(hass).async_get_device(
-        connections={(dr.CONNECTION_BLUETOOTH, instance.mac)}
-    )
-    if device is not None:
-        return device.name_by_user or device.name or instance.mac
-    return instance.mac
-
-
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
     """Register integration-level services (once per HA start)."""
@@ -160,12 +149,8 @@ def async_setup_services(hass: HomeAssistant) -> None:
             )
         if errors:
             # The address and the low-level reason are in the log above.
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="update_failed",
-                translation_placeholders={
-                    "names": ", ".join(_device_name(hass, i) for i, _ in errors),
-                },
+            raise update_failed(
+                ", ".join(device_name(hass, i) for i, _ in errors)
             ) from errors[0][1]
 
     hass.services.async_register(

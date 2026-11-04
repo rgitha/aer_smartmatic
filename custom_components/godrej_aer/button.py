@@ -9,7 +9,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_NAME, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import async_device_device_info_fn, async_send_command
+from .entity import (
+    async_device_device_info_fn, async_send_command, device_name, update_failed,
+)
 from .godrej import SmartMatic
 from .godrej.events import DEVICE_REACHABILITY
 
@@ -98,7 +100,12 @@ class SmartMaticUpdateStatusButton(SmartMaticDeviceButton):
 
     async def async_press(self) -> None:
         _LOGGER.debug("%s: Update status pressed", self._config_entry.data[CONF_NAME])
-        await async_send_command(self._update())
+        # The same error as the Update status action, naming the device.
+        try:
+            await self._update()
+        except Exception as err:
+            _LOGGER.warning("Manual status update failed for %s: %s", self._instance.mac, err)
+            raise update_failed(device_name(self.hass, self._instance)) from err
 
     async def _update(self) -> None:
         await self._instance.connect(purpose="update status")
