@@ -1077,7 +1077,7 @@ async def test_update_status_action_errors(hass):
         with pytest.raises(HomeAssistantError) as err:
             await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
     assert err.value.translation_key == "update_failed"
-    assert err.value.translation_placeholders["count"] == "1"
+    assert err.value.translation_placeholders == {"names": "Hall"}  # not the address
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()

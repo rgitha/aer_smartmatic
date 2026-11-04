@@ -206,7 +206,7 @@
             "message": "No loaded Smart Matic devices match the target."
         },
         "update_failed": {
-            "message": "Couldn't update {count} device(s). {address}: {error}"
+            "message": "Couldn't reach {names}. Check that it's switched on and in range, and try again."
         },
         "invalid_schedule": {
             "message": "{error}"
