@@ -46,7 +46,7 @@ and an interval of 10, 20 or 40 minutes. An end at or before the start means
 the next day, so a window can run past midnight, up to 24 hours. The end is
 rounded down to a whole interval, and a schedule holds at most 144 sprays.
 To edit them from a dashboard, use the
-[schedule card](https://github.com/rgitha/godrej-aer-schedule-card).
+[Smart Matic card](https://github.com/rgitha/godrej-aer-card).
 
 **Diagnostic sensors**
 - **Connection status:** OK, or Unreachable when the device isn't heard or the
