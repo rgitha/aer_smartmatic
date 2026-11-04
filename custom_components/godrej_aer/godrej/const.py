@@ -49,6 +49,10 @@ CONNECT_ATTEMPTS = 1
 CONNECT_TIMEOUT = 5
 # Background reads, which nobody is waiting on, wait for the whole attempt.
 BACKGROUND_PURPOSES = ("status poll", "read-back")
+# Seconds after a save to read the status, when a saved schedule covers the
+# current time: the device starts it at its next schedule check (about
+# every 45-50 s), with a spray. Reads stop once the status shows the run.
+SCHEDULE_START_READS = (30, 60, 90)
 # After this many failed attempts in a row while the device is still
 # heard, warn that the adapter or proxy may need a restart.
 STUCK_AFTER = 3

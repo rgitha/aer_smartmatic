@@ -145,8 +145,10 @@ All target one or more devices.
 | `godrej_aer.stop_schedule` | `schedule`: `current`, `all` or a number. Skips a running schedule; the device acknowledges but ignores a number that isn't running. |
 
 Every upload is read back, and an error is shown if the device didn't keep it.
-Saving schedules stops a running schedule until its next start: the device
-replaces the whole list, and it starts a schedule only at its start time.
+Saving schedules interrupts a running schedule, as the device replaces the
+whole list. A saved schedule covering the current time starts within about a
+minute, at the device's next schedule check, with a spray; its sprays then
+follow from that moment.
 
 ```yaml
 action: godrej_aer.add_schedule
@@ -210,8 +212,8 @@ automation:
   ones set here. Manage them from one place.
 - **Skipping ahead:** only a schedule that is running can be skipped; a later
   run can't be skipped in advance.
-- **Saving stops a run:** changing any schedule while one is running stops
-  that run until its next start.
+- **Saving interrupts a run:** changing any schedule while one is running
+  interrupts it for about a minute; it then starts again with a spray.
 
 ## Troubleshooting
 

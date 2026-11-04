@@ -1326,6 +1326,26 @@ async def test_saving_schedules_reads_the_status_back(monkeypatch):
     assert refresh == [1]
 
 
+async def test_saving_a_schedule_covering_now_watches_for_its_start(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    monkeypatch.setattr(matic, "_schedule_refresh", lambda: None)
+    watched = []
+    monkeypatch.setattr(matic, "_watch_schedule_start", lambda: watched.append(1))
+    now = gm.dt_util.now()
+    day = gm.DAYS[now.weekday()] if hasattr(gm, "DAYS") else ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.weekday()]
+    start = f"{(now.hour - 1) % 24:02d}:00"
+    end = f"{(now.hour + 1) % 24:02d}:00"
+    covering = sched([day], start, end, 20)
+    await matic.set_schedules([covering])
+    assert watched == [1]
+    watched.clear()
+    later = sched([day], f"{(now.hour + 3) % 24:02d}:00", f"{(now.hour + 4) % 24:02d}:00", 20)
+    await matic.set_schedules([later])
+    assert watched == []  # nothing will start: no follow-up reads
+
+
 async def test_clearing_schedules_skips_the_upload(monkeypatch):
     monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
     device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)

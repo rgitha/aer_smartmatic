@@ -32,6 +32,7 @@ from .const import (
     BACKGROUND_PURPOSES,
     CONNECT_ATTEMPTS,
     CONNECT_TIMEOUT,
+    SCHEDULE_START_READS,
     STUCK_AFTER,
     CONNECT_RETRY_BACKOFF,
     MAIN_SVC,
@@ -268,6 +269,7 @@ class SmartMatic:
         # The one connection attempt in flight, shared by everyone waiting.
         self._link_task: asyncio.Task[BleakClient] | None = None
         self._link_waiters = 0
+        self._start_watch: asyncio.Task[None] | None = None
         self._link_failures = 0  # in a row, while heard
         self._refresh_task: asyncio.Task[None] | None = None
         # Reachability: off only on real trouble, not on the normal
@@ -506,10 +508,12 @@ class SmartMatic:
         finally:
             if not done:
                 await self.read_schedules_quietly()
-            # Removing the schedules stops a running one until its next
-            # start (the device only starts schedules at their start time),
-            # so read the status back to show that.
+            # "Remove all" interrupts a running schedule: read the status to
+            # show that. A saved schedule covering the current time starts
+            # again within about a minute, so watch for that too.
             self._schedule_refresh()
+            if any(self._covers_now(s) for s in schedules):
+                self._watch_schedule_start()
         if stored is None:
             # The device took the upload but will not list it back:
             # ``schedules`` keeps the acknowledged list.
@@ -545,6 +549,43 @@ class SmartMatic:
         code = self._schedule_target(target)
         _LOGGER.debug("Sending stop schedule (%s, code %s) to %s", target, code, self.mac)
         await self._write_action(encode_message(mT=106, mN=156, sS=code), 156)
+
+    @staticmethod
+    def _covers_now(schedule: Schedule, now: datetime | None = None) -> bool:
+        """The window holds ``now``, allowing a minute either side: the
+        device checks its schedules only about every 45-50 s (the same
+        allowance as running_schedule)."""
+        now = now or dt_util.now()
+        minute = now.weekday() * 24 * 60 + now.hour * 60 + now.minute
+        return any(start - 1 <= minute <= end + 1 for start, end in schedule.windows())
+
+    def _watch_schedule_start(self) -> None:
+        """Read the status at 30, 60 and 90 s, until it shows a schedule run."""
+        if self._start_watch is not None:
+            self._start_watch.cancel()
+
+        async def _watch() -> None:
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            for at in SCHEDULE_START_READS:
+                await asyncio.sleep(max(0.0, at - (loop.time() - began)))
+                try:
+                    async with self._connect_lock:
+                        await self._ensure_connected(purpose="read-back")
+                        await self._ensure_subscribed()
+                        await self.get_device_status()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    _LOGGER.debug("Status read after saving schedules failed: %s", e)
+                    await self.delayed_disconnect()
+                    continue
+                status = self.device_status
+                if status is not None and status.spray_source == "schedule":
+                    _LOGGER.debug("%s started the schedule covering now", self.mac)
+                    return
+
+        self._start_watch = asyncio.get_running_loop().create_task(_watch())
 
     def running_schedule(self, now: datetime | None = None) -> int | None:
         """The number (1-based) of the schedule running now, if any.
@@ -1016,6 +1057,8 @@ class SmartMatic:
         # is left running.
         if self._link_task is not None and not self._link_task.done():
             self._link_task.cancel()
+        if self._start_watch is not None:
+            self._start_watch.cancel()
         async with self._connect_lock:
             self._cancel_delayed_disconnect()
             self._cancel_refresh()

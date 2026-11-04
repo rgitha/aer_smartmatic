@@ -49,7 +49,7 @@
     },
     "set_schedules": {
       "name": "Set schedules",
-      "description": "Replaces all of the device's own spray schedules (up to 10). Each needs days, start, end and interval (10, 20 or 40 minutes). The device keeps running them without Home Assistant. A running schedule stops until its next start.",
+      "description": "Replaces all of the device's own spray schedules (up to 10). Each needs days, start, end and interval (10, 20 or 40 minutes). The device keeps running them without Home Assistant. Saving interrupts a running schedule; one covering the current time starts within about a minute.",
       "fields": {
         "schedules": {
           "name": "Schedules",
@@ -63,7 +63,7 @@
     },
     "add_schedule": {
       "name": "Add schedule",
-      "description": "Adds one schedule to the device's own schedules. A running schedule stops until its next start.",
+      "description": "Adds one schedule to the device's own schedules. Saving interrupts a running schedule; one covering the current time starts within about a minute.",
       "fields": {
         "days": {
           "name": "Days",
@@ -85,7 +85,7 @@
     },
     "remove_schedule": {
       "name": "Remove schedule",
-      "description": "Removes one of the device's schedules, by its number in the Schedules sensor's list. A running schedule stops until its next start.",
+      "description": "Removes one of the device's schedules, by its number in the Schedules sensor's list. Saving interrupts a running schedule; one covering the current time starts within about a minute.",
       "fields": {
         "number": {
           "name": "Number",
@@ -95,7 +95,7 @@
     },
     "clear_schedules": {
       "name": "Clear schedules",
-      "description": "Removes all of the device's own schedules. A running schedule stops until its next start."
+      "description": "Removes all of the device's own schedules. A running schedule stops."
     },
     "stop_schedule": {
       "name": "Skip schedule run",
