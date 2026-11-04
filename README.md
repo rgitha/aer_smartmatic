@@ -5,6 +5,8 @@ Bluetooth Low Energy (BLE) room freshener. It reads the device's status and
 controls it locally over Bluetooth, through an adapter on the Home Assistant
 host or an ESPHome Bluetooth proxy. No cloud account is needed.
 
+Forked from [ov1d1u/godrej_aer integration](https://github.com/ov1d1u/godrej_aer).
+
 ## Use cases
 
 - Spray when someone enters a room, or before guests arrive.
@@ -66,7 +68,7 @@ To edit them from a dashboard, use the
 ### HACS
 
 1. In HACS, open the menu and choose **Custom repositories**.
-2. Add `https://github.com/ov1d1u/godrej_aer` as an **Integration**.
+2. Add `https://github.com/rgitha/godrej_aer` as an **Integration**.
 3. Install **Godrej Aer Smart Matic** and restart Home Assistant.
 
 ### Manual

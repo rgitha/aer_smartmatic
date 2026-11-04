@@ -14,8 +14,8 @@
   "dependencies": [
     "bluetooth_adapters"
   ],
-  "documentation": "https://github.com/ov1d1u/godrej_aer",
-  "issues": "https://github.com/ov1d1u/godrej_aer/issues",
+  "documentation": "https://github.com/rgitha/godrej_aer",
+  "issues": "https://github.com/rgitha/godrej_aer/issues",
   "homekit": {},
   "iot_class": "local_polling",
   "requirements": [
