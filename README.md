@@ -37,7 +37,10 @@ shows the status, Spray now, auto-spray and the schedules in one card, and
 lets you add and edit schedules from a dashboard. **It is installed
 separately**, from its own repository.
 
-<img src="docs/images/card.png" alt="The companion card" width="60%">
+<p>
+  <img src="docs/images/card.png" alt="The companion card with its schedules" width="49%">
+  <img src="docs/images/card-compact.png" alt="The companion card showing the next schedule" width="49%">
+</p>
 
 ## Installation
 
