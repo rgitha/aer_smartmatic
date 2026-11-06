@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
+import random
+from dataclasses import dataclass
 import logging
 import time
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
-from datetime import datetime, timedelta
+from collections.abc import AsyncIterator, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, TypeVar
+from datetime import datetime, timedelta, timezone
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.service import BleakGATTService
@@ -23,7 +27,14 @@ if TYPE_CHECKING:
 
 from . import cbor
 from .const import (
+    NEW_BATTERY_MIN,
+    NEW_BATTERY_RISE,
+    SETUP_SETTLE,
+    CLOCK_CHECK_ATTEMPTS,
+    CLOCK_CHECK_INTERVAL,
+    CLOCK_CHECK_TIMEOUT,
     DISCONNECT_DELAY,
+    SAVE_FINISH_TIMEOUT,
     STATUS_TIMEOUT,
     PROBE_TIMEOUT,
     DETECT_TIMEOUT,
@@ -35,6 +46,8 @@ from .const import (
     SCHEDULE_START_READS,
     STUCK_AFTER,
     HEARD_RECENTLY,
+    CLOCK_TOLERANCE,
+    CLOCK_READ_TIMEOUT,
     CONNECT_RETRY_BACKOFF,
     MAIN_SVC,
     NOTIFY_CHAR,
@@ -52,13 +65,16 @@ from .schedule import (
     Schedule, ScheduleError, normalise_schedule_dict, validate as validate_schedules,
 )
 from .eventbus import EventBus
-from .devicestatus import ACK_OK, DeviceStatus
+from .devicestatus import ACK_OK, STATUS_REPLY_MT, DeviceStatus
 from .exception import (
     BatteryTooLow,
     CommandNotConfirmed,
     InvalidDeviceError,
     ConnectionError,
+    DeviceBusy,
+    NoClock,
     NotIdle,
+    ScheduleRunning,
     SchedulesChanged,
     SchedulesNotStored,
 )
@@ -71,6 +87,15 @@ from .events import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_T = TypeVar("_T")
+
+# When a user's request (a press, Identify, a save, Update status) must have
+# the link by, counted from the request: it waits for its turn and the
+# connection within CONNECT_TIMEOUT, or fails, as an answer should come
+# quickly. Cleared once the link is up.
+_link_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "link_deadline", default=None
+)
 
 # Seconds between the set-time message and the next one.
 SET_TIME_PACING = 1.0
@@ -82,6 +107,7 @@ _FRAGMENT_TIMEOUT = 2.0
 # Replies to commands (request mT + 50), for logging.
 _ACK_LABELS = {
     152: "Clock set",
+    164: "Clock read",
     154: "Spray command",
     155: "Refill reset",
     156: "Auto-spray stop",
@@ -90,9 +116,39 @@ _ACK_LABELS = {
     159: "Schedule read",
     163: "LED test",
 }
-# Detection tags each probe with its own message number (mN), so a late
-# reply can be matched to the probe it answers.
-_PROBE_MN_BASE = 200
+# Message numbers (mN). The device copies a message's mN into its reply
+# (refusals included; tested on fw 3.0.8-IN), so each message gets its own
+# and replies are matched by it; a refusal's mT is just the previous
+# reply's. Numbers come from 100-253, always encoded in two bytes (0x18 nn)
+# like the reply types,
+# and never 150-170: a reply carrying one of those is from a firmware that
+# doesn't copy the number, which puts its reply type there instead.
+_MN_FIRST, _MN_LAST = 100, 253
+_MN_REPLY_TYPES = range(150, 171)
+_MN_CHOICES = [n for n in range(_MN_FIRST, _MN_LAST + 1) if n not in _MN_REPLY_TYPES]
+
+
+def with_mn(payload: bytes, mn: int) -> bytes:
+    """``payload`` with its message number replaced by ``mn``.
+
+    The messages built here carry their reply type as a placeholder,
+    encoded as ``"mN": 0x18 nn``; ``mn`` takes the same two bytes.
+    """
+    key = _cbor_key("mN") + b"\x18"
+    at = payload.find(key)
+    if at < 0 or not 24 <= mn <= 255:
+        raise ValueError(f"Can't number message {payload.hex()} with {mn}")
+    at += len(key)
+    return payload[:at] + bytes([mn]) + payload[at + 1:]
+
+
+@dataclass
+class _Waiter:
+    """A message sent and awaiting its reply."""
+
+    reply_mt: int
+    label: str
+    future: asyncio.Future[DeviceStatus]
 
 
 def _cbor_uint(n: int) -> bytes:
@@ -163,6 +219,10 @@ IDENTIFY_SECONDS = 3
 
 REMOVE_SCHEDULES_MSG = encode_message(mT=108, mN=158)
 RETRIEVE_SCHEDULES_MSG = encode_message(mT=109, mN=159)
+# {"mT": 114, "mN": 164}: read the clock. The reply's tID is the device's
+# local time in seconds; it knows no time zone, so read as UTC it gives
+# the device's wall-clock time.
+READ_CLOCK_MSG = encode_message(mT=114, mN=164)
 
 
 def encode_schedules(schedules: list[Schedule]) -> bytes:
@@ -224,11 +284,17 @@ class SmartMatic:
         *,
         command_char: str | None = None,
         reply_char: str | None = None,
+        has_clock: bool = True,
     ) -> None:
         """``command_char``/``reply_char`` are the characteristics stored at
-        setup (see detect_channels()); without them the defaults are used."""
+        setup (see detect_channels()); without them the defaults are used.
+        ``has_clock``: found at setup; without a clock there are no
+        schedules, and the clock is never read or set."""
         self.hass = hass
         self.mac = mac
+        self.has_clock = has_clock
+        # Setup's finding (detect_channels): whether the device keeps time.
+        self.detected_clock: bool | None = None
         self.client: BleakClient | None = None
         self.device_status: DeviceStatus | None = None
         # The device's own schedules as last read back; None until read.
@@ -243,8 +309,36 @@ class SmartMatic:
         # The last schedule read failed: read them again after the next
         # successful status read.
         self._schedules_stale = False
+        # The device's clock as last read on a new link, and its offset.
+        self.device_time: datetime | None = None
+        self.clock_offset: float | None = None
+        self.clock_read_at: datetime | None = None
+        self._clock_unreadable = False
+        # When the clock was last checked (monotonic), and whether it should
+        # be checked at the next chance anyway (see _clock_due).
+        self._clock_checked_at: float | None = None
+        self._clock_check_wanted = True
+        # User requests waiting for their turn: a background clock check
+        # gives way to them.
+        self._user_waiting = 0
+        self._clock_task: asyncio.Task[None] | None = None
+        # When new batteries were last seen (see _note_new_batteries), and
+        # the battery level from before a restart, until a status is read.
+        self.batteries_replaced_at: datetime | None = None
+        self.restored_battery_percent: int | None = None
+        self._link_holds = 0  # operations keeping the link open
+        # A reply was missed: close the link when the operation ends, so a
+        # late reply can't be taken for the answer to a later message.
+        self._drop_link = False
+        self._clock_just_set = False
+        # Schedule saves run to their end even if the caller is cancelled.
+        self._save_tasks: set[asyncio.Task[Any]] = set()
+        # Watches in the middle of a read, which a newer watch lets finish.
+        self._watch_reading: set[asyncio.Task[Any]] = set()
+        # Not heard for a while: read the status again once it is heard.
+        self._status_outdated = False
+        self._command_owner: asyncio.Task[Any] | None = None
         self._stale_read: asyncio.Task[None] | None = None
-        self._device_status_event = asyncio.Event()
         self._disconnect_task: asyncio.Task[None] | None = None
         self._retry_after: datetime | None = None
         self._poll_failures = 0
@@ -258,13 +352,17 @@ class SmartMatic:
         # Detection only: walk the whole service, subscribe to everything.
         self._detecting = False
         self._subscribe_all = False
-        # Reply mT -> future resolved with the ack value. Commands are sent
-        # one at a time (``_command_lock``), so at most one waits per type.
-        self._ack_waiters: dict[int, asyncio.Future[DeviceStatus]] = {}
+        # Messages awaiting replies, by the message number (mN) they went
+        # out with; the next number to hand out (from a random start, so
+        # numbers differ from one run to the next); whether the device
+        # copies our numbers back (see _waiter_for).
+        self._waiters: dict[int, _Waiter] = {}
+        self._mn_next = random.choice(_MN_CHOICES)
+        self._echoes_mn = True
+        # Setup: the number of each probe sent, and the characteristic it
+        # went to, so a late reply is credited to its own probe.
+        self._probe_sent: dict[int, str] = {}
         self._command_lock = asyncio.Lock()
-        # Counts commands, so a failed status read can tell whether a press
-        # used the link while it waited (see _close_after_failed_read).
-        self._commands_sent = 0
         # The status read in progress, if any. It may be waiting for its
         # reply without holding the lock; other callers share its result.
         self._status_read: asyncio.Future[bool] | None = None
@@ -314,6 +412,10 @@ class SmartMatic:
             _LOGGER.info("%s is heard again; its entities are available", self.mac)
         elif not seen and self._advertising is not False:
             _LOGGER.info("%s is no longer heard; its entities are unavailable", self.mac)
+            # It may have changed while away (batteries out, its button):
+            # read it again as soon as it is heard, and check its clock.
+            self._status_outdated = True
+            self._clock_check_wanted = True
         self._advertising = seen
         return self.heard != was_heard
 
@@ -342,13 +444,14 @@ class SmartMatic:
     ) -> bool:
         """Open the BLE link and fetch a fresh device status.
 
-        The link lock is held only while the link is opened and messages
-        are written. The pauses in between and the wait for the reply run
-        outside it, so a button press can use the open link straight away
-        instead of queueing behind a status read.
+        One operation (see _operation): a press meanwhile waits for it.
+        Callers asking while a read is in progress share its result.
         """
         current = self._status_read
-        if current is not None and not current.done():
+        # Not from inside an operation (Identify's check): a read queued
+        # behind it would wait for it, and it for the read.
+        in_operation = self._command_owner is asyncio.current_task()
+        if current is not None and not current.done() and not in_operation:
             # e.g. Update status during a background read: share its result,
             # but someone waiting still gets an answer as quickly as usual.
             if purpose in BACKGROUND_PURPOSES:
@@ -386,51 +489,42 @@ class SmartMatic:
         return self._status_read is not None and not self._status_read.done()
 
     async def _connect_and_read(self, status_timeout: float, purpose: str) -> bool:
-        commands_before = self._commands_sent
-        status_before = self.device_status
-        async with self._connect_lock:
-            self._cancel_delayed_disconnect()
-            await self._open_connection(purpose=purpose)
+        async with self._operation(user=purpose not in BACKGROUND_PURPOSES):
             try:
-                await self._set_time(pace=False)
+                async with self._connect_lock:
+                    self._clock_just_set = False
+                    await self._open_connection(purpose=purpose)
+                    if purpose == "status poll":
+                        # Background: a good moment for the clock, if due.
+                        await self._sync_clock_if_due()
+                if self._clock_just_set:
+                    # Let the device take its new time before asking (as the
+                    # app paces it); not needed when the clock was left alone.
+                    await asyncio.sleep(SET_TIME_PACING)
+                async with self._connect_lock:
+                    _LOGGER.debug("Asking %s for its status", self.mac)
+                    mn, waiter = await self._send_expecting(
+                        FETCH_STATUS_MSG, STATUS_REPLY_MT, "Status request"
+                    )
+                await self._await_status_reply(mn, waiter, status_timeout)
             except BaseException:
-                await self._cleanup_connection()
-                raise
-
-        try:
-            # Match the app's pacing between messages.
-            await asyncio.sleep(SET_TIME_PACING)
-            async with self._connect_lock:
-                self._device_status_event.clear()
-                _LOGGER.debug("Asking %s for its status", self.mac)
-                await self._write_message(FETCH_STATUS_MSG)
-            await self._await_status_reply(status_timeout)
-        except BaseException as error:
-            await self._close_after_failed_read(commands_before)
-            # Cleanup may have waited for an action's refresh to finish.
-            # Accept its fresh status instead of reporting the older error
-            # and marking the device unreachable after a successful reply.
-            # Cancellation and failures after that reply still propagate.
-            recovered = (
-                isinstance(error, ConnectionError)
-                and self.device_status is not status_before
-                and self._last_exchange_ok is True
-            )
-            if not recovered:
+                self._missed_reply()
                 raise
 
         # Got a fresh status, clear any retry cooldown from earlier failures.
         self._retry_after = None
         self._poll_failures = 0
-        await self.delayed_disconnect()
         return True
 
-    async def read_schedules(self) -> list[Schedule]:
-        """Read the schedules stored on the device."""
+    async def read_schedules(self, *, user: bool = True) -> list[Schedule]:
+        """Read the schedules stored on the device. ``user``: someone is
+        waiting for them (see _operation)."""
+        self._need_clock()
         _LOGGER.debug("Asking %s for its schedules", self.mac)
         try:
             reply = await self._write_action(
-                RETRIEVE_SCHEDULES_MSG, 159, timeout=SCHEDULE_REPLY_TIMEOUT, refresh=False
+                RETRIEVE_SCHEDULES_MSG, 159, timeout=SCHEDULE_REPLY_TIMEOUT,
+                refresh=False, user=user,
             )
             entries = []
             try:
@@ -461,9 +555,13 @@ class SmartMatic:
 
         Reading the list is a courtesy: firmwares that never answer the
         retrieve message (109) must not fail the exchange it came with.
+        Not limited in time like a user's request: it may wait its turn.
+        A device with no clock has none to read.
         """
+        if not self.has_clock:
+            return None
         try:
-            return await self.read_schedules()
+            return await self.read_schedules(user=False)
         except Exception as e:
             _LOGGER.warning("Could not read the schedules of %s: %s", self.mac, e)
             _LOGGER.debug("Schedule read for %s failed", self.mac, exc_info=True)
@@ -496,14 +594,49 @@ class SmartMatic:
         shows it. If given, the device is read first and nothing is
         written when its list differs (changed elsewhere meanwhile).
         """
+        self._need_clock()
         validate_schedules(schedules)
-        async with self._schedules_lock:
-            return await self._set_schedules(schedules, expected)
+
+        async def _save() -> list[Schedule]:
+            async with self._schedules_lock:
+                return await self._set_schedules(schedules, expected)
+
+        return await self._run_to_end(_save())
+
+    async def _run_to_end(self, save: Coroutine[Any, Any, _T]) -> _T:
+        """Run a schedule save to its end even if the caller is cancelled
+        (a closed dialog, a timed-out action): stopped between "remove
+        all" and the upload, it would leave the device with no schedules."""
+        task = asyncio.get_running_loop().create_task(save)
+        self._save_tasks.add(task)
+        task.add_done_callback(self._save_done)
+        return await asyncio.shield(task)
+
+    def _save_done(self, task: asyncio.Task[Any]) -> None:
+        self._save_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # Seen by the caller, unless it stopped waiting.
+            _LOGGER.debug("Schedule save on %s ended: %r", self.mac, task.exception())
 
     async def _set_schedules(
         self, schedules: list[Schedule], expected: list[dict[str, Any]] | None
     ) -> list[Schedule]:
-        """set_schedules() with ``_schedules_lock`` already held."""
+        """set_schedules() with ``_schedules_lock`` already held. One
+        operation (a press meanwhile waits, rather than widening the gap
+        with no schedules), with the link open from the first read to the
+        read-back."""
+        async with self._operation(user=True):
+            if self.has_clock:
+                # Schedules run on the device's clock: check it first.
+                async with self._connect_lock:
+                    await self._ensure_connected(purpose="schedule save")
+                    await self._ensure_subscribed()
+                    await self._sync_clock_if_due(force=True)
+            return await self._replace_schedules(schedules, expected)
+
+    async def _replace_schedules(
+        self, schedules: list[Schedule], expected: list[dict[str, Any]] | None
+    ) -> list[Schedule]:
         if expected is not None:
             current = [normalise_schedule_dict(s.as_dict()) for s in await self.read_schedules()]
             if current != [normalise_schedule_dict(e) for e in expected]:
@@ -575,6 +708,7 @@ class SmartMatic:
         clears the stop once its clock has been past the window's end for
         about 50 s (it checks its schedules every ~45-50 s).
         """
+        self._need_clock()
         code = self._schedule_target(target)
         _LOGGER.debug("Sending stop schedule (%s, code %s) to %s", target, code, self.mac)
         await self._write_action(encode_message(mT=106, mN=156, sS=code), 156)
@@ -589,29 +723,61 @@ class SmartMatic:
         return any(start - 1 <= minute <= end + 1 for start, end in schedule.windows())
 
     def _watch_schedule_start(self) -> None:
-        """Read the status at 30, 60 and 90 s, until it shows a schedule run."""
-        if self._start_watch is not None:
-            self._start_watch.cancel()
+        """After a save: watch for a schedule covering now to start."""
+        self.watch_schedule_change(starting=True)
+
+    def watch_schedule_change(self, *, starting: bool) -> None:
+        """Read the status at 30, 60 and 90 s from now, until it shows a
+        schedule run (``starting``) or no schedule run.
+
+        For a save covering the current time, and for each schedule's
+        start and end (the device starts and stops a run at its next
+        schedule check, within about a minute).
+        A newer watch replaces this one. One in the middle of a read
+        finishes the read first: cancelling it there would cut the
+        exchange short.
+        """
+        if not self.has_clock:
+            return  # no schedules run
+        previous = self._start_watch
+        if previous is not None and previous not in self._watch_reading:
+            previous.cancel()
 
         async def _watch() -> None:
+            me = asyncio.current_task()
             loop = asyncio.get_running_loop()
             began = loop.time()
-            for at in SCHEDULE_START_READS:
+            for index, at in enumerate(SCHEDULE_START_READS):
                 await asyncio.sleep(max(0.0, at - (loop.time() - began)))
+                if me is not None:
+                    self._watch_reading.add(me)
+                failed: Exception | None = None
                 try:
-                    async with self._connect_lock:
+                    async with self._operation(), self._connect_lock:
                         await self._ensure_connected(purpose="read-back")
                         await self._ensure_subscribed()
+                        if index == 0:
+                            # A schedule start or end: the clock matters now.
+                            await self._sync_clock_if_due(force=True)
                         await self.get_device_status()
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
-                    _LOGGER.debug("Status read after saving schedules failed: %s", e)
-                    await self.delayed_disconnect()
+                except Exception as e:  # noqa: BLE001 - the next read may work
+                    failed = e
+                finally:
+                    if me is not None:
+                        self._watch_reading.discard(me)
+                if self._start_watch is not me:
+                    return  # a newer watch took over
+                if failed is not None:
+                    _LOGGER.debug("Status read for a schedule change failed: %s", failed)
                     continue
                 status = self.device_status
-                if status is not None and status.spray_source == "schedule":
-                    _LOGGER.debug("%s started the schedule covering now", self.mac)
+                running = status is not None and status.spray_source == "schedule"
+                if running == starting:
+                    _LOGGER.debug(
+                        "%s %s a schedule run", self.mac, "started" if starting else "ended"
+                    )
                     return
 
         self._start_watch = asyncio.get_running_loop().create_task(_watch())
@@ -637,50 +803,131 @@ class SmartMatic:
         return None
 
     async def add_schedule(self, schedule: Schedule) -> list[Schedule]:
-        # The read and the write it is based on belong together.
-        async with self._schedules_lock:
-            current = await self.read_schedules()
-            wanted = [*current, schedule]
-            validate_schedules(wanted)
-            return await self._set_schedules(wanted, None)
+        self._need_clock()
+
+        async def _save() -> list[Schedule]:
+            # The read and the write it is based on belong together.
+            async with self._schedules_lock:
+                current = await self.read_schedules()
+                wanted = [*current, schedule]
+                validate_schedules(wanted)
+                return await self._set_schedules(wanted, None)
+
+        return await self._run_to_end(_save())
 
     async def remove_schedule(self, number: int) -> list[Schedule]:
         """Remove schedule ``number`` (1-based, as listed by ``schedules``)."""
-        async with self._schedules_lock:
-            current = await self.read_schedules()
-            if not 1 <= number <= len(current):
-                raise ScheduleError(
-                    f"There is no schedule {number}; the device has {len(current)}"
-                )
-            wanted = current[:number - 1] + current[number:]
-            validate_schedules(wanted)
-            return await self._set_schedules(wanted, None)
+        self._need_clock()
 
-    async def _await_status_reply(self, timeout: float) -> None:
+        async def _save() -> list[Schedule]:
+            async with self._schedules_lock:
+                current = await self.read_schedules()
+                if not 1 <= number <= len(current):
+                    raise ScheduleError(
+                        f"There is no schedule {number}; the device has {len(current)}"
+                    )
+                wanted = current[:number - 1] + current[number:]
+                validate_schedules(wanted)
+                return await self._set_schedules(wanted, None)
+
+        return await self._run_to_end(_save())
+
+    def _need_clock(self) -> None:
+        """Schedules need the device's clock: refuse them without one."""
+        if not self.has_clock:
+            raise NoClock(f"{self.mac} has no clock, so it can't keep schedules")
+
+    async def _await_status_reply(self, mn: int, waiter: _Waiter, timeout: float) -> None:
         """Wait for the status reply, without holding the link lock."""
         _LOGGER.debug("Waiting for device status from %s...", self.mac)
         try:
-            await asyncio.wait_for(self._device_status_event.wait(), timeout)
+            reply = await self._await_reply(mn, waiter, timeout)
         except asyncio.TimeoutError:
             raise ConnectionError(
                 f"Timeout waiting for device status response from {self.mac}"
             ) from None
+        if not reply.is_valid:
+            raise ConnectionError(
+                f"{self.mac} refused the status request (code {reply.acknowledgement})"
+            )
 
-    async def _close_after_failed_read(self, commands_before: int) -> None:
-        """Don't leave the link open after a failed status read.
+    # --- message numbers
 
-        Waits for the lock, so a command using the link finishes first. If
-        a command did use the link meanwhile, it is closed after the usual
-        delay instead, like after any other exchange.
+    def _next_mn(self) -> int:
+        """A message number not awaiting a reply (see _MN_FIRST)."""
+        for _ in range(len(_MN_CHOICES)):
+            mn = self._mn_next
+            index = _MN_CHOICES.index(mn)
+            self._mn_next = _MN_CHOICES[(index + 1) % len(_MN_CHOICES)]
+            if mn not in self._waiters and mn not in self._probe_sent:
+                return mn
+        raise RuntimeError(f"No free message number for {self.mac}")
+
+    async def _send_expecting(
+        self, payload: bytes, reply_mt: int, label: str, *, char: str | None = None
+    ) -> tuple[int, _Waiter]:
+        """Send ``payload`` under a number of its own, and register for its
+        reply (await it with _await_reply)."""
+        mn = self._next_mn()
+        waiter = _Waiter(reply_mt, label, asyncio.get_running_loop().create_future())
+        self._waiters[mn] = waiter
+        message = with_mn(payload, mn)
+        _LOGGER.debug(">> %s: %s (%s, mN %d)", char or self._write_char, message.hex(), label, mn)
+        try:
+            await self._write_message(message, char=char)
+        except BaseException:
+            self._forget(mn, waiter)
+            raise
+        return mn, waiter
+
+    async def _await_reply(self, mn: int, waiter: _Waiter, timeout: float) -> DeviceStatus:
+        """The reply to message ``mn``; TimeoutError if none came in time."""
+        try:
+            return await asyncio.wait_for(waiter.future, timeout)
+        finally:
+            self._forget(mn, waiter)
+
+    def _forget(self, mn: int, waiter: _Waiter) -> None:
+        if self._waiters.get(mn) is waiter:
+            del self._waiters[mn]
+
+    def _missed_reply(self) -> None:
+        """A reply didn't come (or the wait was cut short). Only a device
+        that doesn't copy message numbers needs its link closed: there, a
+        late reply could pass for the answer to a later message."""
+        if not self._echoes_mn:
+            self._drop_link = True
+
+    def _waiter_for(self, message: DeviceStatus) -> _Waiter | None:
+        """The message awaiting this reply, matched by its number (mN).
+
+        A reply carrying a reply type (150-170) instead of one of our
+        numbers comes from a firmware that doesn't copy them: it is
+        matched by type, and from then on (until a restart) so is every
+        reply, with the link closed after a missed one.
         """
-        async with self._connect_lock:
-            if self._commands_sent != commands_before and self.client is not None:
-                await self.delayed_disconnect()
-            else:
-                await self._cleanup_connection()
+        mn = message.message_id
+        if mn is None:
+            return None
+        waiter = self._waiters.get(mn)
+        if waiter is not None:
+            return waiter
+        if mn not in _MN_REPLY_TYPES:
+            return None
+        for waiter in self._waiters.values():
+            if waiter.reply_mt in (mn, message.message_type):
+                if self._echoes_mn:
+                    self._echoes_mn = False
+                    _LOGGER.warning(
+                        "%s doesn't copy message numbers into its replies (sent ours, "
+                        "got %s back); matching replies by type, and closing the link "
+                        "after any missed reply", self.mac, mn,
+                    )
+                return waiter
+        return None
 
     async def _open_connection(
-        self, *, subscribe: bool = True, settle: float = 2.0,
+        self, *, subscribe: bool = True, settle: float = ACTION_SETTLE,
         max_attempts: int | None = None, purpose: str = "status poll",
     ) -> None:
         """Establish the BLE link and (by default) subscribe to notifications.
@@ -694,6 +941,7 @@ class SmartMatic:
 
         if self.client and self.client.is_connected:
             _LOGGER.debug("Already connected to %s", self.mac)
+            _link_deadline.set(None)  # linked in time (see _operation)
             if subscribe:
                 await self._ensure_subscribed()
             return
@@ -706,7 +954,11 @@ class SmartMatic:
                 f"Device {self.mac} is not currently available over Bluetooth"
             )
 
-        wait = None if purpose in BACKGROUND_PURPOSES else CONNECT_TIMEOUT
+        wait: float | None = None if purpose in BACKGROUND_PURPOSES else CONNECT_TIMEOUT
+        deadline = _link_deadline.get()
+        if deadline is not None:
+            # A user's request: what's left of its time (see _operation).
+            wait = max(0.0, deadline - asyncio.get_running_loop().time())
         task = self._link(device, max_attempts)
         # Wait without the lock, so that a background read waiting for a
         # slow attempt doesn't hold up a press; the press joins the attempt.
@@ -717,7 +969,7 @@ class SmartMatic:
         except Exception as e:
             self._connect_failed_at = asyncio.get_running_loop().time()
             if isinstance(e, TimeoutError) and wait is not None and not task.done():
-                reason = f"no connection within {wait:g} s"  # still trying
+                reason = f"no connection within {CONNECT_TIMEOUT:g} s"  # still trying
             elif isinstance(e, TimeoutError):
                 reason = "the connection attempt timed out"
             else:
@@ -728,6 +980,8 @@ class SmartMatic:
             self._link_waiters -= 1
             await self._connect_lock.acquire()
 
+        # Linked in time: later steps (a reconnect, say) aren't held to it.
+        _link_deadline.set(None)
         if self.client is client and client.is_connected:
             # Another waiter took the link while this one waited for the lock.
             if subscribe:
@@ -959,14 +1213,40 @@ class SmartMatic:
             return None
         return max(0.0, (self._retry_after - datetime.now()).total_seconds())
 
-    async def connect_if_needed(self) -> bool:
-        # A recent status is enough, unless the last exchange (e.g. a press)
-        # failed: then check again so Connection status can recover.
-        if (
+    @property
+    def _status_due(self) -> bool:
+        """None in the last hour, the last exchange failed (so Connection
+        status can recover), or the device was out of hearing meanwhile."""
+        return self._status_outdated or not (
             self.device_status
             and self.device_status.is_valid
             and self._last_exchange_ok is not False
-        ):
+        )
+
+    @property
+    def _clock_due(self) -> bool:
+        """Whether a background exchange should check the clock: not
+        checked since Home Assistant started or the device was last
+        heard again, or not within CLOCK_CHECK_INTERVAL."""
+        if not self.has_clock:
+            return False
+        if self._clock_check_wanted or self._clock_checked_at is None:
+            return True
+        return time.monotonic() - self._clock_checked_at >= CLOCK_CHECK_INTERVAL
+
+    def needs_status_read(self) -> bool:
+        """Whether a background exchange is due (for the coordinator): a
+        status read (see _status_due) or just a clock check (_clock_due);
+        not while backing off or something is in progress."""
+        if self._command_lock.locked() or self._reading_status:
+            return False
+        if self._retry_after is not None and datetime.now() < self._retry_after:
+            return False
+        return self._status_due or self._clock_due
+
+    async def connect_if_needed(self) -> bool:
+        status_due = self._status_due
+        if not status_due and not self._clock_due:
             return False
 
         if self._retry_after is not None and datetime.now() < self._retry_after:
@@ -976,16 +1256,20 @@ class SmartMatic:
             )
             return False
 
-        if self._connect_lock.locked() or self._reading_status:
+        if self._command_lock.locked() or self._reading_status:
             _LOGGER.debug(
                 "Skipping connect to %s, an attempt is already in progress",
                 self.mac
             )
             return False
 
-        _LOGGER.debug("Background status read for %s", self.mac)
         try:
-            await self.connect()
+            if status_due:
+                _LOGGER.debug("Background status read for %s", self.mac)
+                await self.connect()  # also checks the clock, if due
+            else:
+                # The status is recent: just the clock.
+                await self.check_clock()
         except Exception as e:
             self._set_exchange_ok(False)
             backoff = CONNECT_RETRY_BACKOFF[
@@ -996,7 +1280,8 @@ class SmartMatic:
             # Warn only on the first failure in a row.
             log = _LOGGER.debug if self._failure_logged else _LOGGER.warning
             log(
-                "Could not get status from %s (%s); retrying no sooner than %s",
+                "Could not %s %s (%s); retrying no sooner than %s",
+                "get status from" if status_due else "check the clock of",
                 self.mac, e, self._retry_after.strftime("%H:%M:%S")
             )
             self._failure_logged = True
@@ -1025,7 +1310,8 @@ class SmartMatic:
         report = progress or (lambda stage, details, fraction: None)
         report("connecting", {}, 0.0)
         self._cancel_refresh()
-        async with self._connect_lock:
+        # In the queue like any operation; it closes its own link.
+        async with self._command_queue(), self._connect_lock:
             saved = self._command_char, self._reply_char
             await self._cleanup_connection()
             self._command_char, self._reply_char = DEFAULT_COMMAND_CHAR, DEFAULT_REPLY_CHAR
@@ -1033,15 +1319,12 @@ class SmartMatic:
             self._detecting = True
             sent: dict[int, str] = {}
             try:
-                await self._open_connection(purpose="setup check")
+                await self._open_connection(settle=SETUP_SETTLE, purpose="setup check")
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + timeout
 
                 report("checking_defaults", {}, 0.0)
-                # The plain status request, unnumbered.
-                command = await self._probe(
-                    DEFAULT_COMMAND_CHAR, PROBE_TIMEOUT, sent, numbered=False
-                )
+                command = await self._probe(DEFAULT_COMMAND_CHAR, PROBE_TIMEOUT, sent)
                 if command is None:
                     _LOGGER.info(
                         "Default channels of %s did not answer; probing", self.mac
@@ -1064,11 +1347,18 @@ class SmartMatic:
                     self.mac, command, self._last_reply_char,
                     self.device_status.firmware_version if self.device_status else "?"
                 )
-                await self._set_time(command)
-                return command, self._last_reply_char
+                reply = self._last_reply_char
+                report("checking_clock", {}, 1.0)
+                try:
+                    self.detected_clock = await self._check_clock(command)
+                except ConnectionError as e:
+                    _LOGGER.warning("Clock check on %s failed: %s", self.mac, e)
+                    return None
+                return command, reply
             finally:
                 self._command_char, self._reply_char = saved
                 self._detecting = self._subscribe_all = False
+                self._probe_sent = {}
                 await self._cleanup_connection()
 
     def _cancel_delayed_disconnect(self) -> None:
@@ -1091,10 +1381,17 @@ class SmartMatic:
         """
         if self._link_task is not None and not self._link_task.done():
             self._link_task.cancel()
+        if self._save_tasks:
+            # Let a schedule save finish rather than leave the device empty.
+            await asyncio.wait(self._save_tasks, timeout=SAVE_FINISH_TIMEOUT)
         if self._start_watch is not None:
             self._start_watch.cancel()
+        for watch in self._watch_reading:
+            watch.cancel()
         if self._stale_read is not None:
             self._stale_read.cancel()
+        if self._clock_task is not None:
+            self._clock_task.cancel()
         await self.disconnect()
 
     async def disconnect(self) -> bool:
@@ -1135,7 +1432,99 @@ class SmartMatic:
         except Exception as e:
             _LOGGER.debug("Error while cleaning up connection to %s: %s", self.mac, e)
 
+    @contextlib.asynccontextmanager
+    async def _operation(self, *, user: bool = False) -> AsyncIterator[None]:
+        """Every exchange with the device runs in one of these.
+
+        Operations run one at a time, each whole (a status read, a press
+        with its checks, Identify, a schedule save), so nothing slips in
+        between a check and the command it decides. The link stays open
+        throughout, and when the operation ends, however it ends, the idle
+        disconnect starts, or the link closes at once if a reply was
+        missed. Re-entrant: the steps of an operation don't queue again.
+
+        ``user``: someone is waiting for it, so it must get its turn and
+        the link within CONNECT_TIMEOUT of the request, or fail (with a
+        message to the user) rather than go out late.
+        """
+        deadline: float | None = None
+        if user and self._command_owner is not asyncio.current_task():
+            deadline = asyncio.get_running_loop().time() + CONNECT_TIMEOUT
+        waiting = deadline is not None
+        if waiting:
+            self._user_waiting += 1  # a background clock check gives way
+        try:
+            async with self._command_queue(deadline), self._holding_link():
+                if waiting:
+                    self._user_waiting -= 1
+                    waiting = False
+                token = _link_deadline.set(deadline) if deadline is not None else None
+                try:
+                    yield
+                finally:
+                    if token is not None:
+                        _link_deadline.reset(token)
+        finally:
+            if waiting:
+                self._user_waiting -= 1
+
+    @contextlib.asynccontextmanager
+    async def _command_queue(self, deadline: float | None = None) -> AsyncIterator[None]:
+        """One operation at a time (see _operation). Re-entrant: the steps
+        of an operation already in the queue don't queue again. With a
+        ``deadline``, gives up waiting for its turn then."""
+        task = asyncio.current_task()
+        if task is not None and self._command_owner is task:
+            yield
+            return
+        if deadline is None:
+            await self._command_lock.acquire()
+        else:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            try:
+                await asyncio.wait_for(self._command_lock.acquire(), remaining)
+            except TimeoutError as e:
+                raise DeviceBusy(
+                    f"{self.mac} is busy with another exchange "
+                    f"(no turn within {CONNECT_TIMEOUT:g} s)"
+                ) from e
+        self._command_owner = task
+        try:
+            yield
+        finally:
+            self._command_owner = None
+            self._command_lock.release()
+
+    @contextlib.asynccontextmanager
+    async def _holding_link(self) -> AsyncIterator[None]:
+        """Keep the link open until the operation ends; then start the
+        idle disconnect, or close it now if a reply was missed."""
+        self._link_holds += 1
+        self._cancel_delayed_disconnect()
+        try:
+            yield
+        finally:
+            self._link_holds -= 1
+            if not self._link_holds:
+                if self._drop_link:
+                    self._drop_link = False
+                    await self._close_link()
+                else:
+                    await self.delayed_disconnect()
+
+    async def _close_link(self) -> None:
+        """Close the link now: a late reply to a message that went
+        unanswered must not be taken for the reply to a later one."""
+        if self.client is None:
+            return
+        _LOGGER.debug("Closing the link to %s: a reply didn't come", self.mac)
+        async with self._connect_lock:
+            await self._cleanup_connection()
+
     async def delayed_disconnect(self) -> None:
+        if self._link_holds:
+            return  # the operation holding the link disconnects after it
+
         async def _delayed_disconnect() -> None:
             if not self.client or not self.client.is_connected:
                 _LOGGER.debug("%s already disconnected, skipping delayed disconnect.", self.mac)
@@ -1144,7 +1533,12 @@ class SmartMatic:
             try:
                 _LOGGER.debug("Waiting %ss before disconnecting from %s...", DISCONNECT_DELAY, self.mac)
                 await asyncio.sleep(DISCONNECT_DELAY)
-                await self.disconnect()
+                async with self._connect_lock:
+                    if self._link_holds:
+                        return  # an operation started meanwhile
+                    if self._disconnect_task is asyncio.current_task():
+                        self._disconnect_task = None
+                    await self._disconnect()
             except Exception as e:
                 _LOGGER.debug("Failed to disconnect. Error: %s", e)
 
@@ -1153,10 +1547,175 @@ class SmartMatic:
         self._cancel_delayed_disconnect()
         self._disconnect_task = loop.create_task(_delayed_disconnect())
 
-    async def _set_time(self, char: str | None = None, *, pace: bool = True) -> None:
-        """Push the current time to the device before reading status.
+    async def check_clock(self) -> None:
+        """Background: check the device's clock, the status being recent
+        enough. Gives way to an action waiting for the link: the clock is
+        then checked at the next chance after it (the device advertises
+        again once its link closes)."""
+        async with self._operation():
+            if self._user_waiting:
+                _LOGGER.debug("Clock check on %s gives way to an action", self.mac)
+                return
+            async with self._connect_lock:
+                _LOGGER.debug("Background clock check for %s", self.mac)
+                await self._ensure_connected(purpose="clock check")
+                await self._ensure_subscribed()
+                await self._sync_clock_if_due()
 
-        Sent on every connect. Some devices (in particular ones that were
+    def _note_new_batteries(self, before: DeviceStatus | None, after: DeviceStatus) -> None:
+        """New batteries: the level rose by more than NEW_BATTERY_RISE points
+        to at least NEW_BATTERY_MIN, against the last status read (or the
+        level kept from before a restart, for a swap while Home Assistant
+        was down). Noted in ``batteries_replaced_at``; they restart the
+        device's clock, so it is checked straight away, as a background
+        exchange after whatever is running."""
+        was = before.battery_percent if before is not None else self.restored_battery_percent
+        now = after.battery_percent
+        if was is None or now is None or now < NEW_BATTERY_MIN or now - was <= NEW_BATTERY_RISE:
+            return
+        _LOGGER.info(
+            "%s seems to have new batteries (%d%% -> %d%%); checking its clock",
+            self.mac, was, now,
+        )
+        self.batteries_replaced_at = dt_util.utcnow()
+        self._clock_check_wanted = True
+        if not self.has_clock or (self._clock_task and not self._clock_task.done()):
+            return
+
+        async def _check() -> None:
+            try:
+                await self.check_clock()
+            except Exception as e:  # noqa: BLE001 - the next background read retries
+                _LOGGER.debug("Clock check after new batteries on %s failed: %s", self.mac, e)
+
+        self._clock_task = asyncio.get_running_loop().create_task(_check())
+
+    async def _sync_clock_if_due(self, *, force: bool = False) -> None:
+        """Check the clock on the open link if it is due (see _clock_due),
+        or ``force``d: schedule starts, ends and saves."""
+        if not self.has_clock or not (force or self._clock_due):
+            return
+        await self._sync_clock()
+        self._clock_checked_at = time.monotonic()
+        self._clock_check_wanted = False
+
+    async def _sync_clock(self) -> None:
+        """Read the device's clock and set it only if it is more than
+        CLOCK_TOLERANCE seconds off, or can't be read."""
+        try:
+            device_time = await self._read_clock()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - the set below covers it
+            _LOGGER.debug("Could not read the clock of %s: %s", self.mac, e)
+            device_time = None
+        now = dt_util.now().replace(tzinfo=None, microsecond=0)
+        if device_time is not None:
+            offset = (device_time - now).total_seconds()
+            self.device_time = device_time
+            self.clock_offset = offset
+            self.clock_read_at = dt_util.utcnow()
+            within = abs(offset) <= CLOCK_TOLERANCE
+            _LOGGER.debug(
+                "Clock of %s reads %s, %+.0f s from Home Assistant; %s",
+                self.mac, device_time.isoformat(sep=" "), offset,
+                f"not set (within {CLOCK_TOLERANCE} s)" if within
+                else f"set to the current time {now.isoformat(sep=' ')}",
+            )
+            if within:
+                return
+        else:
+            _LOGGER.debug(
+                "Clock of %s couldn't be read; set to the current time %s",
+                self.mac, now.isoformat(sep=" "),
+            )
+        await self._set_time(pace=False)
+        self._clock_just_set = True
+
+    async def _check_clock(self, char: str) -> bool:
+        """Setup: whether the device keeps time and schedules.
+
+        Without a writable schedule characteristic (SCHEDULE_CHAR) it
+        has no schedules, and the clock isn't checked. Otherwise sets its
+        clock (102 -> 152), then reads it back (114 -> 164). A refusal
+        (not ack 200), or a clock that didn't take the time, means it has
+        none. Each step gets CLOCK_CHECK_ATTEMPTS tries; no answer at all
+        raises ConnectionError, failing setup like any other unanswered
+        exchange.
+        """
+        if SCHEDULE_CHAR not in (self._writable_chars() or ()):
+            _LOGGER.info(
+                "%s has no writable schedule characteristic (%s): no clock, no schedules",
+                self.mac, SCHEDULE_CHAR,
+            )
+            return False
+        answer = await self._clock_message(char, encode_set_time, 152, "set the clock")
+        if answer.acknowledgement != ACK_OK:
+            _LOGGER.info("%s refused the clock setting: no clock, no schedules", self.mac)
+            return False
+        reply = await self._clock_message(char, READ_CLOCK_MSG, 164, "read the clock")
+        seconds = cbor.loads(reply.raw).get("tID") if reply.acknowledgement == ACK_OK else None
+        if not isinstance(seconds, int):
+            _LOGGER.info("%s refused the clock read: no clock, no schedules", self.mac)
+            return False
+        device_time = datetime.fromtimestamp(seconds, timezone.utc).replace(tzinfo=None)
+        now = dt_util.now().replace(tzinfo=None, microsecond=0)
+        offset = (device_time - now).total_seconds()
+        self.device_time, self.clock_offset = device_time, offset
+        self.clock_read_at = dt_util.utcnow()
+        if abs(offset) > CLOCK_TOLERANCE:
+            _LOGGER.info(
+                "%s reads %s just after being set (%+.0f s): no clock, no schedules",
+                self.mac, device_time.isoformat(sep=" "), offset,
+            )
+            return False
+        _LOGGER.info("%s keeps time (reads %+.0f s after setting)", self.mac, offset)
+        return True
+
+    async def _clock_message(
+        self, char: str, payload: bytes | Callable[[], bytes], reply_mt: int, what: str
+    ) -> DeviceStatus:
+        """Send a clock message and return the device's answer, trying
+        CLOCK_CHECK_ATTEMPTS times; raises ConnectionError if none came."""
+        for attempt in range(1, CLOCK_CHECK_ATTEMPTS + 1):
+            message = payload() if callable(payload) else payload
+            mn, waiter = await self._send_expecting(
+                message, reply_mt, f"{what}, try {attempt}", char=char
+            )
+            try:
+                return await self._await_reply(mn, waiter, CLOCK_CHECK_TIMEOUT)
+            except TimeoutError:
+                _LOGGER.debug("%s didn't answer when asked to %s", self.mac, what)
+        raise ConnectionError(
+            f"{self.mac} didn't answer when asked to {what} ({CLOCK_CHECK_ATTEMPTS} tries)"
+        )
+
+    async def _read_clock(self) -> datetime | None:
+        """The device's wall-clock time (114 -> 164), or None if it doesn't
+        answer. A device that refuses the message isn't asked again (its
+        clock is then set on each new link)."""
+        if self._clock_unreadable:
+            return None
+        mn, waiter = await self._send_expecting(READ_CLOCK_MSG, 164, "Clock read")
+        try:
+            reply = await self._await_reply(mn, waiter, CLOCK_READ_TIMEOUT)
+        except TimeoutError:
+            _LOGGER.debug("%s didn't answer the clock read", self.mac)
+            self._missed_reply()
+            return None
+        if reply.acknowledgement != ACK_OK:
+            self._clock_unreadable = True
+            return None
+        seconds = cbor.loads(reply.raw).get("tID")
+        if not isinstance(seconds, int):
+            return None
+        return datetime.fromtimestamp(seconds, timezone.utc).replace(tzinfo=None)
+
+    async def _set_time(self, char: str | None = None, *, pace: bool = True) -> None:
+        """Push the current time to the device.
+
+        Sent on a new link when the clock is more than CLOCK_TOLERANCE
+        seconds off or can't be read (see _sync_clock). Some devices (in particular ones that were
         never provisioned)
         do not emit a usable status frame until their clock has been set
         at least once. A failure here is logged but not fatal: the status
@@ -1169,6 +1728,9 @@ class SmartMatic:
             return
 
         char = char or self._write_char
+        # Nothing waits for its reply (152); a number of its own keeps that
+        # reply from matching anything else.
+        payload = with_mn(payload, self._next_mn())
         _LOGGER.debug(">> %s: %s (set time)", char, payload.hex())
         try:
             await self._write_message(payload, char=char)
@@ -1183,7 +1745,8 @@ class SmartMatic:
     async def get_device_status(self, *, timeout: float = STATUS_TIMEOUT) -> None:
         _LOGGER.debug("Getting device status from %s...", self.mac)
 
-        if not await self._request_status(self._write_char, timeout):
+        if await self._request_status(self._write_char, timeout) is None:
+            self._missed_reply()
             raise ConnectionError(
                 f"Timeout waiting for device status response from {self.mac}"
             )
@@ -1192,49 +1755,46 @@ class SmartMatic:
         self._retry_after = None
         self._poll_failures = 0
 
-        await self.delayed_disconnect()
-
     async def _request_status(
-        self, char: str, timeout: float, message: bytes = FETCH_STATUS_MSG
-    ) -> bool:
-        """Send fetch-status to ``char``; True if a status reply arrived."""
-        self._device_status_event.clear()
-
-        _LOGGER.debug(">> %s: %s (fetch status)", char, message.hex())
+        self, char: str, timeout: float, *, probe: bool = False
+    ) -> int | None:
+        """Send a status request to ``char``; the mN of the status reply
+        that answered it, or None if none did. ``probe``: recorded as a
+        setup probe (see _probe)."""
+        mn = self._next_mn()
+        if probe:
+            self._probe_sent[mn] = char
+        waiter = _Waiter(STATUS_REPLY_MT, "Status request", asyncio.get_running_loop().create_future())
+        self._waiters[mn] = waiter
+        message = with_mn(FETCH_STATUS_MSG, mn)
+        _LOGGER.debug(">> %s: %s (fetch status, mN %d)", char, message.hex(), mn)
         try:
             await self._write_message(message, char=char)
         except Exception as e:
+            self._forget(mn, waiter)
             _LOGGER.debug("Write to %s on %s failed: %s", char, self.mac, e)
-            return False
+            return None
 
         _LOGGER.debug("Waiting for device status from %s...", self.mac)
         try:
-            await asyncio.wait_for(self._device_status_event.wait(), timeout)
+            reply = await self._await_reply(mn, waiter, timeout)
         except asyncio.TimeoutError:
-            return False
-        return True
+            return None
+        return reply.message_id if reply.is_valid else None
 
-    async def _probe(
-        self, char: str, timeout: float, sent: dict[int, str], *, numbered: bool = True
-    ) -> str | None:
-        """Probe ``char`` with a status request.
+    async def _probe(self, char: str, timeout: float, sent: dict[int, str]) -> str | None:
+        """Probe ``char`` with a status request during setup.
 
         Returns the characteristic the reply belongs to: usually ``char``,
-        but an earlier probe's if a late reply carries its number (mN) back.
-        If the device doesn't echo numbers, the reply is credited to
-        ``char``. ``numbered=False`` sends the app's own request (mN 157).
+        but an earlier probe's if a late reply carries that probe's number
+        (mN) back. A reply carrying a reply type instead (a firmware that
+        doesn't copy numbers) is credited to ``char``.
         """
-        # Only numbered probes are recorded: 157 is also what a device that
-        # doesn't echo mN puts in every reply.
-        if numbered:
-            mn = _PROBE_MN_BASE + len(sent)
-            sent[mn] = char
-            message = encode_message(mT=107, mN=mn)
-        else:
-            mn, message = 157, FETCH_STATUS_MSG
-        if not await self._request_status(char, timeout, message):
+        self._probe_sent = sent
+        reply_mn = await self._request_status(char, timeout, probe=True)
+        if reply_mn is None:
             return None
-        reply_mn = self.device_status.message_id if self.device_status else None
+        mn = next((n for n, c in reversed(sent.items()) if c == char), None)
         _LOGGER.debug(
             "Status reply to probe of %s: sent mN=%s, reply mN=%s", char, mn, reply_mn
         )
@@ -1243,16 +1803,22 @@ class SmartMatic:
             return sent[reply_mn]
         return char
 
-    def _command_char_candidates(self) -> list[str]:
-        """Every writable characteristic in the main service, known ones first."""
+    def _writable_chars(self) -> list[str] | None:
+        """The main service's writable characteristics; None if the
+        service table can't be read."""
         main_svc = self.client.services.get_service(MAIN_SVC) if self.client else None
         if main_svc is None:
-            return list(COMMAND_CHAR_CANDIDATES)
-
-        writable = [
+            return None
+        return [
             char.uuid.lower() for char in main_svc.characteristics
             if "write" in char.properties or "write-without-response" in char.properties
         ]
+
+    def _command_char_candidates(self) -> list[str]:
+        """Every writable characteristic in the main service, known ones first."""
+        writable = self._writable_chars()
+        if writable is None:
+            return list(COMMAND_CHAR_CANDIDATES)
         known = [uuid for uuid in COMMAND_CHAR_CANDIDATES if uuid in writable]
         return known + [uuid for uuid in writable if uuid not in known]
 
@@ -1303,7 +1869,7 @@ class SmartMatic:
 
     async def _write_action(
         self, payload: bytes, reply_mt: int, *, char: str | None = None,
-        timeout: float = ACK_TIMEOUT, refresh: bool = True,
+        timeout: float = ACK_TIMEOUT, refresh: bool = True, user: bool = True,
     ) -> DeviceStatus:
         """Send a command and wait for the device to acknowledge it.
 
@@ -1315,9 +1881,13 @@ class SmartMatic:
         Commands are sent one at a time: acks only carry the reply type,
         and Spray and Auto Spray share one, so overlapping commands could
         not be told apart. Each waits for its ack from its own write.
+        ``user``: someone is waiting (see _operation); not for reads the
+        integration makes by itself.
         """
         queued_at = asyncio.get_running_loop().time()
-        async with self._command_lock:
+        # A read-back still to come is out of date once this is sent.
+        self._cancel_refresh()
+        async with self._operation(user=user):
             return await self._write_action_locked(
                 payload, reply_mt, char=char, timeout=timeout,
                 refresh=refresh, queued_at=queued_at,
@@ -1328,16 +1898,16 @@ class SmartMatic:
         timeout: float = ACK_TIMEOUT, refresh: bool = True,
         queued_at: float | None = None,
     ) -> DeviceStatus:
-        """Send one command; the caller must hold ``_command_lock``.
+        """Send one command, as a step of an operation already in the queue.
 
-        For sequences such as Identify, which hold the lock across all
+        For sequences such as Identify, which hold the queue across all
         of their commands so that nothing else can slip in between them.
         """
         loop = asyncio.get_running_loop()
         if queued_at is None:
             queued_at = loop.time()
         self._cancel_refresh()
-        async with self._connect_lock:
+        async with self._holding_link(), self._connect_lock:
             failed_at = self._connect_failed_at
             if failed_at is not None and failed_at >= queued_at:
                 raise ConnectionError(
@@ -1351,7 +1921,6 @@ class SmartMatic:
         self, payload: bytes, reply_mt: int, *, char: str | None = None,
         timeout: float = ACK_TIMEOUT, refresh: bool = True,
     ) -> DeviceStatus:
-        self._commands_sent += 1
         try:
             await self._ensure_connected()
             await self._ensure_subscribed()
@@ -1363,14 +1932,10 @@ class SmartMatic:
         ack: int | None = None
         reply: DeviceStatus | None = None
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[DeviceStatus] = loop.create_future()
-        self._ack_waiters[reply_mt] = future
         try:
-            char = char or self._write_char
-            _LOGGER.debug(">> %s: %s", char, payload.hex())
-            await self._write_message(payload, char=char)
+            mn, waiter = await self._send_expecting(payload, reply_mt, label, char=char)
             sent_at = loop.time()
-            reply = await asyncio.wait_for(future, timeout)
+            reply = await self._await_reply(mn, waiter, timeout)
             ack = reply.acknowledgement
             _LOGGER.debug("%s answered in %.2f s", label, loop.time() - sent_at)
         except asyncio.TimeoutError:
@@ -1378,16 +1943,16 @@ class SmartMatic:
                 "%s was not acknowledged by %s within %s s",
                 label, self.mac, timeout,
             )
+            self._missed_reply()
+        except asyncio.CancelledError:
+            self._missed_reply()
+            raise
         except Exception as e:
             _LOGGER.warning("%s could not be sent to %s: %s", label, self.mac, e)
-        finally:
-            if self._ack_waiters.get(reply_mt) is future:
-                del self._ack_waiters[reply_mt]
+            self._drop_link = True  # the link itself failed
 
         if refresh:
             self._schedule_refresh()
-        else:
-            await self.delayed_disconnect()
         if ack != ACK_OK or reply is None:
             raise CommandNotConfirmed(f"{label} not confirmed by {self.mac} (ack={ack})")
         return reply
@@ -1413,21 +1978,20 @@ class SmartMatic:
         self._cancel_refresh()
 
         async def _refresh() -> None:
-            async with self._connect_lock:
-                _LOGGER.debug("Reading the status of %s back after the command", self.mac)
-                try:
+            try:
+                async with self._operation(), self._connect_lock:
+                    _LOGGER.debug("Reading the status of %s back after the command", self.mac)
                     await self._ensure_connected(purpose="read-back")
                     await self._ensure_subscribed()
                     await self.get_device_status()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    self._set_exchange_ok(False)
-                    _LOGGER.warning(
-                        "Status refresh after action on %s failed: %s", self.mac, e
-                    )
-                    await self.delayed_disconnect()
-                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._set_exchange_ok(False)
+                _LOGGER.warning(
+                    "Status refresh after action on %s failed: %s", self.mac, e
+                )
+                return
             self._reread_schedules_if_stale()
 
         self._refresh_task = asyncio.get_running_loop().create_task(_refresh())
@@ -1461,6 +2025,42 @@ class SmartMatic:
             )
             raise BatteryTooLow(f"Batteries of {self.mac} at {mv} mV")
 
+    async def choose_auto(self, interval: int | None) -> bool:
+        """Auto off (``interval`` None) or every ``interval`` minutes,
+        judged on a status read just before, in the same queue step.
+
+        Raises ScheduleRunning during a schedule run (the device ignores
+        Auto then; Skip stops a run). Returns False, sending nothing, when
+        it is already spraying at that interval (re-sending would restart
+        it with an extra spray). If the status can't be read, the command
+        is sent anyway.
+        """
+        self._cancel_refresh()  # it reads the status itself
+        async with self._operation(user=True):
+            try:
+                async with self._connect_lock:
+                    await self._ensure_connected(purpose="command")
+                    await self._ensure_subscribed()
+                    await self.get_device_status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - judge on the last status
+                _LOGGER.debug("Status check before Auto on %s failed: %s", self.mac, e)
+            status = self.device_status
+            if status is not None and status.spray_source == "schedule":
+                raise ScheduleRunning(f"A schedule is running on {self.mac}")
+            if (
+                interval is not None and status is not None
+                and status.is_spraying and status.spray_interval == interval
+            ):
+                _LOGGER.debug("Already spraying every %s min; nothing sent", interval)
+                return False
+            if interval is None:
+                await self.stop_spray()
+            else:
+                await self.set_spray_interval(interval)
+            return True
+
     async def stop_spray(self) -> None:
         """Stop auto-spraying."""
         _LOGGER.debug("Sending auto spray off command to %s", self.mac)
@@ -1482,20 +2082,23 @@ class SmartMatic:
         spray; "auto off" would stop auto mode or pause a schedule run).
         Reads a fresh status first to check.
 
-        The whole sequence holds ``_command_lock``: an interval picked
-        during the wait would otherwise be started on the device and then
-        stopped again by the "auto off" that clears the lights. That
-        "auto off" is sent from a ``finally``, so the lights don't stay
-        lit when the test isn't confirmed or the wait is cancelled.
+        The whole sequence, from the status read that checks it is idle
+        to clearing the lights, is one operation: a command pressed
+        meanwhile (an interval, say) waits until it has finished. Otherwise one could slip in
+        after the check, be started on the device, and then be stopped
+        again by the "auto off" that clears the lights. That "auto off"
+        is sent from a ``finally``, so the lights don't stay lit when the
+        test isn't confirmed or the wait is cancelled.
         """
-        await self.connect(purpose="identify")
-        status = self.device_status
-        if status is None or status.current_status is None or status.is_spraying:
-            raise NotIdle(
-                f"{self.mac} is not idle",
-                schedule=bool(status and status.spray_source == "schedule"),
-            )
-        async with self._command_lock:
+        self._cancel_refresh()  # it reads the status itself
+        async with self._operation(user=True):
+            await self.connect(purpose="identify")
+            status = self.device_status
+            if status is None or status.current_status is None or status.is_spraying:
+                raise NotIdle(
+                    f"{self.mac} is not idle",
+                    schedule=bool(status and status.spray_source == "schedule"),
+                )
             try:
                 _LOGGER.debug("Sending LED test to %s", self.mac)
                 await self._write_action_locked(LED_TEST_MSG, 163, refresh=False)
@@ -1571,57 +2174,69 @@ class SmartMatic:
         self._handle_message(bytes(buf[:end]), uuid)
 
     def _handle_message(self, frame: bytes, uuid: str | None = None) -> None:
-        status = DeviceStatus(frame)
-        if not status.is_valid:
-            self._handle_ack(status)
+        """Hand a reply to the message awaiting it, matched by its number.
+
+        A status reply nobody is waiting for is dropped: it answers a read
+        that already gave up, and is older than what is shown. During
+        setup, a late reply to an earlier probe answers the current one
+        (see _probe). Any reply that isn't a full status is an
+        acknowledgement: ack 200, or a refusal (any other code; its mT is
+        just the previous reply's, so it's never used to match).
+        """
+        message = DeviceStatus(frame)
+        waiter = self._waiter_for(message)
+        mn = message.message_id
+
+        if message.is_valid:
+            if (waiter is None or waiter.reply_mt != STATUS_REPLY_MT) and (
+                self._detecting and mn in self._probe_sent
+            ):
+                waiter = next(
+                    (w for w in self._waiters.values() if w.reply_mt == STATUS_REPLY_MT), None
+                )
+            if waiter is None or waiter.reply_mt != STATUS_REPLY_MT:
+                _LOGGER.debug(
+                    "Status reply from %s that nothing asked for (mN %s): ignored, "
+                    "as it is older than the last one", self.mac, mn,
+                )
+                return
+            if uuid is not None:
+                self._last_reply_char = uuid
+            self._note_new_batteries(self.device_status, message)
+            self.device_status = message
+            self._status_outdated = False
+            _LOGGER.debug("Status of %s: %s", self.mac, message.describe())
+            self.last_update = dt_util.utcnow()
+            self._set_exchange_ok(True)
+            if not waiter.future.done():
+                waiter.future.set_result(message)
+            self.eventbus.send(DEVICE_STATUS_UPDATE, self.device_status)
             return
 
-        if uuid is not None:
-            self._last_reply_char = uuid
-
-        self.device_status = status
-        _LOGGER.debug("Status of %s: %s", self.mac, status.describe())
-        self.last_update = dt_util.utcnow()
-        self._set_exchange_ok(True)
-        self._device_status_event.set()
-        self.eventbus.send(DEVICE_STATUS_UPDATE, self.device_status)
-
-    def _handle_ack(self, message: DeviceStatus) -> None:
-        """Log a command acknowledgement and hand it to a waiting action."""
         reply_mt, ack = message.message_type, message.acknowledgement
-        # A refusal comes back with another message type (seen: 157) but
-        # our message number (mN) and a non-200 code. Match it by mN to
-        # the waiting command so it fails at once instead of timing out.
-        refused_for = message.message_id
-        if (
-            reply_mt not in self._ack_waiters
-            and ack != ACK_OK
-            and refused_for in self._ack_waiters
-        ):
-            label = _ACK_LABELS.get(refused_for, f"Command {refused_for - 50}")
+        if waiter is None:
+            known = None if reply_mt is None else _ACK_LABELS.get(reply_mt)
+            if known is None:
+                # Unknown to us: keep the raw bytes, they're the only clue.
+                _LOGGER.debug(
+                    "Ignoring message type %s from %s: %s", reply_mt, self.mac, message.raw.hex()
+                )
+            elif reply_mt != 152:  # nothing ever waits for the clock setting's reply
+                _LOGGER.debug("%s (mN %s): nothing was waiting (it came late)", known, mn)
+            return
+        if ack != ACK_OK:
             _LOGGER.warning(
-                "%s refused by %s (code %s, reply type %s)", label, self.mac, ack, reply_mt
+                "%s refused by %s (code %s, reply type %s)", waiter.label, self.mac, ack, reply_mt
             )
-            future = self._ack_waiters[refused_for]
-            if not future.done():
-                future.set_result(message)
-            return
-        known = None if reply_mt is None else _ACK_LABELS.get(reply_mt)
-        if known is None or reply_mt is None:
-            # Unknown to us: keep the raw bytes, they're the only clue.
+        elif reply_mt != waiter.reply_mt:
             _LOGGER.debug(
-                "Ignoring message type %s from %s: %s", reply_mt, self.mac, message.raw.hex()
+                "%s acknowledged by %s with reply type %s (expected %s)",
+                waiter.label, self.mac, reply_mt, waiter.reply_mt,
             )
-            return
-        if ack == ACK_OK:
-            _LOGGER.debug("%s acknowledged by %s", known, self.mac)
         else:
-            _LOGGER.warning("%s rejected by %s (ack=%s)", known, self.mac, ack)
-        waiter = self._ack_waiters.get(reply_mt)
-        if waiter is not None and not waiter.done():
-            waiter.set_result(message)
-        elif reply_mt != 152:  # nothing ever waits for the clock's reply
-            _LOGGER.debug("%s: nothing was waiting (it came late)", known)
+            _LOGGER.debug("%s acknowledged by %s", waiter.label, self.mac)
+        if not waiter.future.done():
+            waiter.future.set_result(message)
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         # A late callback from an old link must not clear a newer client.

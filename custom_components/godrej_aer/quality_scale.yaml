@@ -3,7 +3,11 @@ rules:
   action-setup: done
   appropriate-polling:
     status: done
-    comment: The status is read hourly, after commands and on request.
+    comment: >
+      Home Assistant's Bluetooth coordinator reads the status at an
+      advertisement when one is due (hourly, or after a failure, with a
+      back-off), after commands, around schedule starts and ends, and on
+      request.
   brands:
     status: done
     comment: Brand images ship in the integration's brand folder.

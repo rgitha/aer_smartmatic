@@ -2,19 +2,12 @@ from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import async_device_device_info_fn
-from .godrej import SmartMatic
-from .godrej.events import (
-    DEVICE_CONNECT,
-    DEVICE_DISCONNECT,
-    DEVICE_REACHABILITY,
-    DEVICE_STATUS_UPDATE,
-)
+from .coordinator import SmartMaticCoordinator
+from .entity import SmartMaticEntity
 
 # Commands to one device are serialised by the device code itself.
 PARALLEL_UPDATES = 0
@@ -24,36 +17,20 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    instance: SmartMatic = config_entry.runtime_data
+    coordinator: SmartMaticCoordinator = config_entry.runtime_data
     async_add_entities([
-        SmartMaticReachableBinarySensor(instance, config_entry),
-        SmartMaticBluetoothLinkBinarySensor(instance, config_entry),
+        SmartMaticReachableBinarySensor(coordinator),
+        SmartMaticBluetoothLinkBinarySensor(coordinator),
     ])
 
 
-class SmartMaticBinarySensor(BinarySensorEntity):
-    _events: tuple[str, ...] = ()
-    _attr_has_entity_name = True
-
-    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
-        self._instance: SmartMatic = instance
-        self._config_entry = config_entry
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    async def async_added_to_hass(self) -> None:
-        for event in self._events:
-            self._instance.eventbus.add_listener(event, self.on_event)
-
-    async def async_will_remove_from_hass(self) -> None:
-        for event in self._events:
-            self._instance.eventbus.remove_listener(event, self.on_event)
+class SmartMaticBinarySensor(SmartMaticEntity, BinarySensorEntity):
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
-    def device_info(self) -> DeviceInfo:
-        return async_device_device_info_fn(self._instance, self._config_entry.data[CONF_NAME])
-
-    async def on_event(self, _data: object) -> None:
-        self.async_write_ha_state()
+    def available(self) -> bool:
+        # They report the device's state, including not being heard.
+        return True
 
 
 class SmartMaticReachableBinarySensor(SmartMaticBinarySensor):
@@ -62,12 +39,8 @@ class SmartMaticReachableBinarySensor(SmartMaticBinarySensor):
     battery, so that says nothing about the device's health.
     """
 
-    _events = (DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE)
+    _key = "reachable"
     _attr_translation_key = "status"
-
-    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
-        super().__init__(instance, config_entry)
-        self._attr_unique_id = f"{config_entry.entry_id}_reachable"
 
     @property
     def is_on(self) -> bool | None:
@@ -88,13 +61,9 @@ class SmartMaticBluetoothLinkBinarySensor(SmartMaticBinarySensor):
     default; enable it to debug connections.
     """
 
-    _events = (DEVICE_CONNECT, DEVICE_DISCONNECT)
+    _key = "bluetooth_link"
     _attr_translation_key = "bluetooth_link"
     _attr_entity_registry_enabled_default = False
-
-    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
-        super().__init__(instance, config_entry)
-        self._attr_unique_id = f"{config_entry.entry_id}_bluetooth_link"
 
     @property
     def is_on(self) -> bool:

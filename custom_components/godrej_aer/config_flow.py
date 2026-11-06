@@ -19,7 +19,7 @@ from homeassistant.components.bluetooth import (
     async_discovered_service_info,
 )
 
-from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR, DOMAIN
+from .const import CONF_COMMAND_CHAR, CONF_HAS_CLOCK, CONF_REPLY_CHAR, DOMAIN
 from .godrej import SmartMatic
 from .godrej.exception import InvalidDeviceError, ConnectionError
 
@@ -40,6 +40,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         self.mac: str = ""
         self.command_char: str | None = None
         self.reply_char: str | None = None
+        self.has_clock = True
         self._manual_entry = False
         self._discovered = False
         self._discovered_name = DEFAULT_NAME
@@ -68,6 +69,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         if channels is None:
             return "no_reply"
         self.command_char, self.reply_char = channels
+        self.has_clock = smartmatic.detected_clock is not False
         return None
 
     async def async_step_user(
@@ -248,6 +250,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                     **entry.data,
                     CONF_COMMAND_CHAR: self.command_char,
                     CONF_REPLY_CHAR: self.reply_char,
+                    CONF_HAS_CLOCK: self.has_clock,
                 },
             )
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
@@ -276,7 +279,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self.mac = entry.options.get(CONF_MAC) or entry.data[CONF_MAC]
             # The device takes one connection: use the loaded instance.
-            instance = getattr(entry, "runtime_data", None)
+            instance = getattr(getattr(entry, "runtime_data", None), "instance", None)
             if not isinstance(instance, SmartMatic):
                 instance = SmartMatic(self.hass, self.mac)
             self._smartmatic = instance
@@ -295,6 +298,7 @@ class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_NAME: self.name,
                 CONF_COMMAND_CHAR: self.command_char,
                 CONF_REPLY_CHAR: self.reply_char,
+                CONF_HAS_CLOCK: self.has_clock,
             },
         )
 

@@ -33,6 +33,18 @@ def load_driver():
 driver = load_driver()
 
 
+def plain(payload):
+    """``payload`` with the reply type as its mN, as the constants hold it
+    (each message goes out with a number of its own)."""
+    message = driver.cbor.loads(bytes(payload))
+    return driver.with_mn(bytes(payload), message["mT"] + 50)
+
+
+def sent(write):
+    """The (characteristic, message) pairs written, as the constants hold them."""
+    return [(call.args[0], plain(call.args[1])) for call in write.await_args_list]
+
+
 class ConnectionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.device = driver.SmartMatic(None, "AA:BB:CC:DD:EE:FF")
@@ -40,6 +52,9 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
                                       disconnect=AsyncMock())
         self.device.client = self.client
         self.device._subscribed = True
+        # Clock checks are covered elsewhere: count it as just checked.
+        self.device._clock_check_wanted = False
+        self.device._clock_checked_at = __import__("time").monotonic()
         self.client.write_gatt_char.side_effect = self.confirm_write
         # These tests isolate link ownership; read-back is covered separately.
         self.refresh_patch = patch.object(self.device, "_schedule_refresh", Mock())
@@ -47,10 +62,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.refresh_patch.stop)
 
     async def confirm_write(self, char, payload):
-        message_type = driver.cbor.loads(payload)["mT"]
+        message = driver.cbor.loads(payload)
+        message_type = message["mT"]
         if message_type in (104, 105, 106):
+            # The device copies the request's number (mN) into its reply.
             self.device._handle_message(driver.encode_message(
-                mT=message_type + 50, mN=message_type + 50, ack=200))
+                mT=message_type + 50, mN=message["mN"], ack=200))
 
     async def asyncTearDown(self):
         tasks = [task for task in (self.device._disconnect_task, self.device._refresh_task)
@@ -83,18 +100,17 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.device._on_disconnect(SimpleNamespace(is_connected=False))
         self.assertIs(self.device.client, self.client)
         await self.device.spray_now()
-        self.client.write_gatt_char.assert_awaited_once_with(
-            driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)
+        self.assertEqual(sent(self.client.write_gatt_char),
+                         [(driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)])
 
-    async def test_action_during_a_status_wait_goes_out_at_once(self):
-        """A press doesn't queue behind a status read waiting for its reply."""
+    async def test_action_waits_for_a_status_read_in_progress(self):
+        """Operations run one at a time: a press goes after the read."""
         entered = asyncio.Event()
         finish = asyncio.Event()
 
-        async def reply(timeout):
+        async def reply(*_args):
             entered.set()
             await finish.wait()
-            raise driver.ConnectionError("No status")
 
         with patch.object(self.device, "_open_connection", AsyncMock()), \
              patch.object(self.device, "_set_time", AsyncMock()), \
@@ -102,20 +118,51 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
              patch.object(self.device, "_await_status_reply", reply):
             poll = asyncio.create_task(self.device.connect())
             await entered.wait()
-            await asyncio.wait_for(self.device.spray_now(), 1)
-            self.client.write_gatt_char.assert_any_await(
-                driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)
+            press = asyncio.create_task(self.device.spray_now())
+            await asyncio.sleep(0.05)
+            written = [m for _, m in sent(self.client.write_gatt_char)]
+            self.assertNotIn(driver.SPRAY_NOW_MSG, written)
             finish.set()
-            with self.assertRaises(driver.ConnectionError):
-                await poll
-        # The press used the link, so the failed read leaves it to the usual
-        # delayed disconnect rather than cutting it off.
+            self.assertTrue(await asyncio.wait_for(poll, 1))
+            await asyncio.wait_for(press, 1)
+            self.assertIn((driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG),
+                          sent(self.client.write_gatt_char))
         self.client.disconnect.assert_not_awaited()
-        self.assertIs(self.device.client, self.client)
         self.assertIsNotNone(self.device._disconnect_task)
 
-    async def test_failed_status_read_closes_an_unused_link(self):
-        async def reply(timeout):
+    async def test_a_command_ack_timeout_keeps_the_link_for_the_idle_disconnect(self):
+        """Its ack would carry its own number, so it can't pass for a later
+        command's: the link stays for the usual idle disconnect."""
+        self.client.write_gatt_char.side_effect = None  # never acknowledged
+        with self.assertRaises(driver.CommandNotConfirmed):
+            await self.device._write_action(driver.SPRAY_NOW_MSG, 154, timeout=0.01)
+        self.client.disconnect.assert_not_awaited()
+        self.assertIsNotNone(self.device._disconnect_task)
+
+    async def test_a_command_ack_timeout_closes_the_link_without_numbered_replies(self):
+        """A firmware that doesn't copy numbers: Spray and Auto share an ack
+        type, so the next command goes on a new link, out of the late
+        ack's reach."""
+        self.device._echoes_mn = False
+        self.client.write_gatt_char.side_effect = None
+        with self.assertRaises(driver.CommandNotConfirmed):
+            await self.device._write_action(driver.SPRAY_NOW_MSG, 154, timeout=0.01)
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.device.client)
+
+    async def test_a_cancelled_command_closes_the_link_without_numbered_replies(self):
+        self.device._echoes_mn = False
+        self.client.write_gatt_char.side_effect = None
+        press = asyncio.create_task(self.device.spray_now())
+        await asyncio.sleep(0.05)
+        press.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await press
+        self.client.disconnect.assert_awaited_once()
+        self.assertIsNone(self.device.client)
+
+    async def _fail_a_status_read(self):
+        async def reply(*_args):
             raise driver.ConnectionError("No status")
 
         with patch.object(self.device, "_open_connection", AsyncMock()), \
@@ -124,61 +171,18 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
              patch.object(self.device, "_await_status_reply", reply):
             with self.assertRaises(driver.ConnectionError):
                 await self.device.connect()
+
+    async def test_failed_status_read_leaves_the_link_to_the_idle_disconnect(self):
+        """A late reply would carry its own number, so the link can stay."""
+        await self._fail_a_status_read()
+        self.client.disconnect.assert_not_awaited()
+        self.assertIsNotNone(self.device._disconnect_task)
+
+    async def test_failed_status_read_closes_the_link_without_numbered_replies(self):
+        self.device._echoes_mn = False
+        await self._fail_a_status_read()
         self.client.disconnect.assert_awaited_once()
         self.assertIsNone(self.device.client)
-
-    async def test_poll_timeout_does_not_override_a_successful_action_refresh(self):
-        self.refresh_patch.stop()
-        poll_waiting = asyncio.Event()
-        expire_poll = asyncio.Event()
-        refresh_waiting = asyncio.Event()
-        cleanup_waiting = asyncio.Event()
-        fetches = 0
-        original_cleanup = self.device._close_after_failed_read
-
-        async def reply(timeout):
-            poll_waiting.set()
-            await expire_poll.wait()
-            raise driver.ConnectionError("No status before poll deadline")
-
-        async def cleanup(commands_before):
-            cleanup_waiting.set()
-            await original_cleanup(commands_before)
-
-        async def write(char, payload):
-            nonlocal fetches
-            if driver.cbor.loads(payload)["mT"] == 107:
-                fetches += 1
-                if fetches == 2:
-                    refresh_waiting.set()
-            else:
-                await self.confirm_write(char, payload)
-
-        self.client.write_gatt_char.side_effect = write
-        with patch.object(self.device, "_open_connection", AsyncMock()), \
-             patch.object(self.device, "_set_time", AsyncMock()), \
-             patch.object(driver, "SET_TIME_PACING", 0), \
-             patch.object(driver.dt_util, "utcnow", lambda: datetime.now(timezone.utc), create=True), \
-             patch.object(self.device, "_await_status_reply", reply), \
-             patch.object(self.device, "_close_after_failed_read", cleanup):
-            poll = asyncio.create_task(self.device.connect_if_needed())
-            self.addAsyncCleanup(self._cancel_task, poll)
-            await asyncio.wait_for(poll_waiting.wait(), 1)
-            await asyncio.wait_for(self.device.spray_now(), 1)
-            await asyncio.wait_for(refresh_waiting.wait(), 1)
-            expire_poll.set()
-            await asyncio.wait_for(cleanup_waiting.wait(), 1)
-            # Cleanup is waiting for the refresh's lock. Its reply arrives
-            # after the older poll expired, but within the refresh deadline.
-            self.assertFalse(poll.done())
-            self.device._handle_message(driver.encode_message(mT=157, ack=200, bV=3170))
-            await asyncio.wait_for(self.device._refresh_task, 1)
-            self.assertTrue(await asyncio.wait_for(poll, 1))
-
-        self.assertTrue(self.device.reachable)
-        self.assertIsNone(self.device.retry_delay)
-        self.assertEqual(self.device._poll_failures, 0)
-        self.client.disconnect.assert_not_awaited()
 
     async def _cancel_task(self, task):
         task.cancel()
@@ -204,8 +208,8 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             finish.set()
             await poll
             await action
-        self.client.write_gatt_char.assert_any_await(
-            driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)
+        self.assertIn((driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG),
+                      sent(self.client.write_gatt_char))
 
     async def test_update_status_during_a_read_shares_its_result(self):
         entered = asyncio.Event()
@@ -216,7 +220,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             nonlocal opened
             opened += 1
 
-        async def reply(timeout):
+        async def reply(*_args):
             entered.set()
             await finish.wait()
 
@@ -238,7 +242,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         finish = asyncio.Event()
 
-        async def reply(timeout):
+        async def reply(*_args):
             entered.set()
             await finish.wait()
             raise driver.ConnectionError("No status")
@@ -261,7 +265,7 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         entered = asyncio.Event()
         finish = asyncio.Event()
 
-        async def reply(timeout):
+        async def reply(*_args):
             entered.set()
             await finish.wait()
 
@@ -358,12 +362,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.device._disconnect_task)
         self.client.disconnect.assert_awaited_once()
 
-    async def test_background_refresh_does_not_wait_for_a_poll_reply(self):
+    async def test_background_refresh_waits_for_a_poll_in_progress(self):
         self.refresh_patch.stop()
         entered = asyncio.Event()
         finish = asyncio.Event()
 
-        async def reply(timeout):
+        async def reply(*_args):
             entered.set()
             await finish.wait()
 
@@ -374,10 +378,12 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             poll = asyncio.create_task(self.device.connect())
             await entered.wait()
             self.device._schedule_refresh()
-            await asyncio.wait_for(self.device._refresh_task, 1)
-            status.assert_awaited_once()
+            await asyncio.sleep(0.05)
+            status.assert_not_awaited()
             finish.set()
             await asyncio.wait_for(poll, 1)
+            await asyncio.wait_for(self.device._refresh_task, 1)
+            status.assert_awaited_once()
 
     async def test_new_action_cancels_an_in_flight_refresh(self):
         self.refresh_patch.stop()
@@ -400,8 +406,8 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.device._refresh_task, 1)
         self.assertTrue(old_refresh.cancelled())
         self.assertEqual(calls, 2)
-        self.client.write_gatt_char.assert_awaited_once_with(
-            driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)
+        self.assertEqual(sent(self.client.write_gatt_char),
+                         [(driver.DEFAULT_COMMAND_CHAR, driver.SPRAY_NOW_MSG)])
 
 
 if __name__ == "__main__":

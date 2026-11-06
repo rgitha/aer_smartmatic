@@ -21,7 +21,7 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
     """Return a report for one device's config entry."""
-    instance: SmartMatic = entry.runtime_data
+    instance: SmartMatic = entry.runtime_data.instance
     integration = await async_get_integration(hass, DOMAIN)
     status = instance.device_status
     info = bluetooth.async_last_service_info(hass, instance.mac, connectable=True)
@@ -59,6 +59,22 @@ async def async_get_config_entry_diagnostics(
             "last_update": instance.last_update.isoformat() if instance.last_update else None,
             "poll_failures": instance._poll_failures,
             "retry_in_seconds": instance.retry_delay,
+            # Whether replies carry back each message's own number (mN);
+            # if not, they are matched by type.
+            "numbered_replies": instance._echoes_mn,
+        },
+        "clock": {
+            # Found at setup; without a clock, no schedules.
+            "has_clock": instance.has_clock,
+            # When new batteries were last seen (their clock restarts).
+            "batteries_replaced_at": (
+                instance.batteries_replaced_at.isoformat() if instance.batteries_replaced_at else None
+            ),
+            # As read on the last new link (114); the offset is from Home
+            # Assistant's local time. Set only when more than 10 s off.
+            "device_time": instance.device_time.isoformat(sep=" ") if instance.device_time else None,
+            "offset_seconds": instance.clock_offset,
+            "read_at": instance.clock_read_at.isoformat() if instance.clock_read_at else None,
         },
         "schedules": None if instance.schedules is None else {
             "list": [

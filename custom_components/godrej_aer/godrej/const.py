@@ -6,23 +6,25 @@ MAIN_SVC = "6e400000-b5a3-f393-e0a9-e50e24dcca9e"
 # RESPONSE characteristic). It has no CCCD; see _raw_proxy_notify.
 NOTIFY_CHAR = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 
-# Default channels: commands on the UART RX characteristic, replies on
-# NOTIFY_CHAR. Fw 3.0.8-IN accepts commands on 6e400002, 6e400003 and
-# 6e400004 alike. Setup checks the defaults and only falls back to probing
-# every writable characteristic (these first) if they don't answer.
+# Default channels: commands on 6e400003, replies on NOTIFY_CHAR
+# (6e400002 takes only the provisioning message).
+# Fw 3.0.8-IN accepts commands on 6e400002, 6e400003 and 6e400004 alike.
+# Setup checks the defaults and only falls back to probing every writable
+# characteristic (these first) if they don't answer.
 COMMAND_CHAR_CANDIDATES = (
-    "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
     "6e400003-b5a3-f393-e0a9-e50e24dcca9e",
+    "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
     "6e400004-b5a3-f393-e0a9-e50e24dcca9e",
 )
 DEFAULT_COMMAND_CHAR = COMMAND_CHAR_CANDIDATES[0]
 # Schedule uploads (message type 103) go to this characteristic.
-SCHEDULE_CHAR = COMMAND_CHAR_CANDIDATES[2]
+SCHEDULE_CHAR = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
 DEFAULT_REPLY_CHAR = NOTIFY_CHAR
 
-# Seconds to stay connected after a successful exchange before dropping the
-# link (keeping it open drains the device battery).
-DISCONNECT_DELAY = 15
+# Seconds a link stays open after the last exchange, for a quick second
+# press (keeping it open drains the device battery). Multi-step operations (a schedule save, Identify) hold it open
+# until they finish.
+DISCONNECT_DELAY = 5
 # Seconds to wait for the status notification after asking for it. Replies
 # usually take well under a second; the slowest seen took about 3 s.
 STATUS_TIMEOUT = 5
@@ -48,7 +50,7 @@ ACK_TIMEOUT = 5
 CONNECT_ATTEMPTS = 1
 CONNECT_TIMEOUT = 5
 # Background reads, which nobody is waiting on, wait for the whole attempt.
-BACKGROUND_PURPOSES = ("status poll", "read-back")
+BACKGROUND_PURPOSES = ("status poll", "read-back", "clock check")
 # Seconds after a save to read the status, when a saved schedule covers the
 # current time: the device starts it at its next schedule check (about
 # every 45-50 s), with a spray. Reads stop once the status shows the run.
@@ -60,9 +62,30 @@ STUCK_AFTER = 3
 # this many seconds: Home Assistant takes minutes to notice a device that
 # went quiet (batteries out, moved away), and that isn't the proxy's fault.
 HEARD_RECENTLY = 30
-# Seconds to wait after connecting before sending a button command.
-# Polls wait 2 s.
+# On each new link the device's clock is read (114 -> 164) and set (102)
+# only if it is more than this many seconds off, or can't be read.
+CLOCK_TOLERANCE = 10
+# In use, the clock is checked by background exchanges only, never ahead of
+# an action someone is waiting for: at most once an hour, and also after
+# Home Assistant starts, when the device is heard again (its batteries may
+# have been out), at each schedule start and end, and before a save.
+CLOCK_CHECK_INTERVAL = 3600
+# New batteries (their clock started again): the level rose by more than
+# this many points between two status reads, to at least NEW_BATTERY_MIN
+# (the same rule as Spritz). The clock is then checked at once.
+NEW_BATTERY_RISE = 10
+NEW_BATTERY_MIN = 90
+CLOCK_READ_TIMEOUT = 2
+# Setup's clock check: tries of each step, and seconds to wait for each.
+CLOCK_CHECK_ATTEMPTS = 2
+CLOCK_CHECK_TIMEOUT = 5
+# On unload, how long to let a schedule save in progress finish.
+SAVE_FINISH_TIMEOUT = 30
+# Seconds to wait after connecting before the first message, for every
+# exchange (commands and background reads alike). Setup waits SETUP_SETTLE,
+# as it may meet firmware not seen before.
 ACTION_SETTLE = 0.5
+SETUP_SETTLE = 2.0
 # Seconds to back off background polls after consecutive failed attempts:
 # short at first (e.g. a proxy still reconnecting after a restart), then
 # every 5 minutes while the device stays unreachable. A success resets it.

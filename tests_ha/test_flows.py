@@ -23,6 +23,20 @@ DETECT = f"{CF}.SmartMatic.detect_channels"
 UNAVAILABLE = []
 
 
+def deliver_status(instance, frame):
+    """A status reply arriving for a read in progress (the device copies
+    the read's number into it); one nobody asked for is ignored."""
+    from custom_components.godrej_aer.godrej import cbor
+    from custom_components.godrej_aer.godrej.godrej import _Waiter
+
+    mn = cbor.loads(frame)["mN"]
+    instance._waiters[mn] = _Waiter(157, "Status request", asyncio.get_running_loop().create_future())
+    try:
+        instance._on_notification(C1, frame)
+    finally:
+        instance._waiters.pop(mn, None)
+
+
 @pytest.fixture(autouse=True)
 def no_deps():
     # Skip setting up the bluetooth_adapters dependency in the test hass.
@@ -82,7 +96,19 @@ async def test_setup_stores_detected_channels(hass):
     assert result["title"] == "Smart Matic"
     assert result["data"] == {
         "mac": MAC, "name": "Smart Matic", CONF_COMMAND_CHAR: C4, CONF_REPLY_CHAR: C1,
+        "has_clock": True,
     }
+
+
+async def test_setup_stores_a_missing_clock(hass):
+    async def detect(self, **kwargs):
+        self.detected_clock = False
+        return C4, C1
+
+    result = await start_flow(hass)
+    result = await pick_device(hass, result, detect)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["has_clock"] is False
 
 
 @pytest.mark.parametrize(
@@ -102,12 +128,12 @@ async def test_setup_without_detection_creates_nothing(hass, detect, error):
     assert hass.config_entries.async_entries(DOMAIN) == []
 
 
-def make_entry(hass, command_char=C4, reply_char=C1):
+def make_entry(hass, command_char=C4, reply_char=C1, **data):
     entry = MockConfigEntry(
         domain=DOMAIN, unique_id=MAC.lower(),
         data={
             "mac": MAC, "name": "Hall",
-            CONF_COMMAND_CHAR: command_char, CONF_REPLY_CHAR: reply_char,
+            CONF_COMMAND_CHAR: command_char, CONF_REPLY_CHAR: reply_char, **data,
         },
     )
     entry.add_to_hass(hass)
@@ -179,6 +205,21 @@ async def test_reconfigure_finishes_with_the_detected_channels(hass):
     assert not result.get("description_placeholders")
 
 
+async def test_reconfigure_stores_whether_it_keeps_time(hass):
+    entry = make_entry(hass)
+
+    async def detect(self, **kwargs):
+        self.detected_clock = False
+        return C4, C1
+
+    result = await start_reconfigure(hass, entry)
+    with patch(DETECT, detect), patch.object(hass.config_entries, "async_schedule_reload"):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result, _ = await finish_progress(hass, result)
+    assert result["reason"] == "channels_detected"
+    assert entry.data["has_clock"] is False
+
+
 async def test_reconfigure_without_reply_changes_nothing(hass):
     entry = make_entry(hass)
     result = await start_reconfigure(hass, entry)
@@ -206,7 +247,7 @@ async def test_reconfigure_uses_the_loaded_instance(hass):
 
     entry = make_entry(hass)
     running = SmartMatic(hass, MAC, command_char=C4, reply_char=C1)
-    entry.runtime_data = running
+    entry.runtime_data = SimpleNamespace(instance=running)
     seen = []
 
     async def detect(self, **kwargs):
@@ -243,13 +284,20 @@ def enable_diagnostics(hass, entry):
         )
 
 
+BT_COORD = "homeassistant.components.bluetooth.update_coordinator"
+ADVERTS: list = []  # the coordinator's advertisement callback, per setup
+
+
 async def setup_entry(hass, entry, service_info=None, connect=None):
     from custom_components.godrej_aer.godrej.godrej import SmartMatic
 
     patches = [
-        patch("homeassistant.components.bluetooth.async_address_present", return_value=True),
         patch("homeassistant.components.bluetooth.async_register_callback", return_value=lambda: None),
-        patch("homeassistant.components.bluetooth.async_track_unavailable",
+        # Where the Bluetooth coordinator looks them up.
+        patch(f"{BT_COORD}.async_address_present", return_value=True),
+        patch(f"{BT_COORD}.async_register_callback",
+              side_effect=lambda hass, cb, matcher, mode: ADVERTS.append(cb) or (lambda: None)),
+        patch(f"{BT_COORD}.async_track_unavailable",
               side_effect=lambda hass, cb, mac, connectable=True: UNAVAILABLE.append(cb) or (lambda: None)),
         patch("homeassistant.components.bluetooth.async_last_service_info", return_value=service_info),
         patch("homeassistant.components.bluetooth.async_scanner_by_source",
@@ -273,7 +321,7 @@ async def test_entry_setup_uses_saved_channels_and_shows_diagnostics(hass):
     info = SimpleNamespace(rssi=-61, source="80:F3:DA:41:58:DB")
     await setup_entry(hass, entry, info)
 
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     assert (instance.command_char, instance.reply_char) == (C4, C1)
 
     command = hass.states.get("sensor.hall_channel_command")
@@ -292,7 +340,7 @@ async def test_legacy_entry_uses_the_default_channels(hass):
     entry = make_entry(hass, None, None)
     enable_diagnostics(hass, entry)
     await setup_entry(hass, entry)
-    assert hass.states.get("sensor.hall_channel_command").state == "6e400002"
+    assert hass.states.get("sensor.hall_channel_command").state == "6e400003"
     assert hass.states.get("sensor.hall_channel_reply").state == "6e400001"
     assert hass.states.get("sensor.hall_signal_strength").state == "unknown"
 
@@ -335,7 +383,7 @@ async def test_unconfirmed_button_press_shows_an_error(hass, entity_id, method):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
 
     with patch.object(instance, method, AsyncMock(side_effect=CommandNotConfirmed("x"))):
         await expect_unconfirmed(hass, "button", "press", entity_id)
@@ -349,7 +397,7 @@ async def test_auto_spray_mode_follows_the_acknowledgement(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     mode = "select.hall_spray_auto"
     assert hass.states.get(mode).attributes["options"] == [
         "Off", "Every 10 min", "Every 20 min", "Every 40 min",
@@ -385,9 +433,9 @@ async def test_auto_spray_mode_follows_the_acknowledgement(hass):
 async def test_auto_spray_mode_shows_the_device_state(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     from test_devicestatus_frame import FRAME
-    instance._on_notification(C1, FRAME)
+    deliver_status(instance, FRAME)
     await hass.async_block_till_done()
     state = hass.states.get("select.hall_spray_auto")
     assert state.state == "Every 40 min"
@@ -409,7 +457,7 @@ async def test_identify(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     with patch.object(instance, "identify", AsyncMock(side_effect=NotIdle("x"))):
         await expect_unconfirmed(hass, "button", "press", "button.hall_identify", key="auto_running")
     with patch.object(instance, "identify", AsyncMock(side_effect=NotIdle("x", schedule=True))):
@@ -458,7 +506,7 @@ async def test_health_entities(hass):
     ent_reg = er.async_get(hass)
     await setup_entry(hass, entry)
 
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     status_id = "binary_sensor.hall_connection_status"
     status = hass.states.get(status_id)
     assert status.state == "unknown"
@@ -468,7 +516,7 @@ async def test_health_entities(hass):
     # A status reply arrives: OK, with the time as an attribute.
     from test_devicestatus_frame import FRAME
     instance.schedules = []  # known: no startup schedule read in this test
-    instance._on_notification(C1, FRAME)
+    deliver_status(instance, FRAME)
     await hass.async_block_till_done()
     status = hass.states.get(status_id)
     assert status.state == "on"
@@ -481,7 +529,7 @@ async def test_health_entities(hass):
 
     # No advertisements for a while: Unreachable, until it is seen again.
     assert len(UNAVAILABLE) == 1
-    UNAVAILABLE[0](SimpleNamespace(address=MAC))
+    UNAVAILABLE[0](SimpleNamespace(address=MAC, time=0.0, name="Smart Matic"))
     await hass.async_block_till_done()
     assert hass.states.get(status_id).state == "off"
     instance.set_advertising(True)
@@ -589,17 +637,17 @@ async def test_battery_is_shown_as_a_percentage(hass):
     entry = make_entry(hass)
     enable_diagnostics(hass, entry)
     await setup_entry(hass, entry)
-    entry.runtime_data._on_notification(C1, FRAME)
+    deliver_status(entry.runtime_data.instance, FRAME)
     await hass.async_block_till_done()
 
     battery = hass.states.get("sensor.hall_battery")
     voltage = hass.states.get("sensor.hall_battery_voltage")
-    mv = entry.runtime_data.device_status.battery_mv
+    mv = entry.runtime_data.instance.device_status.battery_mv
     assert battery.attributes["friendly_name"] == "Hall Battery"
     assert voltage.attributes["friendly_name"] == "Hall Battery voltage"
     assert battery.attributes["device_class"] == "battery"
     assert battery.attributes["unit_of_measurement"] == "%"
-    assert battery.state == str(entry.runtime_data.device_status.battery_percent)
+    assert battery.state == str(entry.runtime_data.instance.device_status.battery_percent)
     assert voltage.state == str(mv)
     ent_reg = er.async_get(hass)
     assert ent_reg.async_get("sensor.hall_battery_voltage").entity_category is er.EntityCategory.DIAGNOSTIC
@@ -610,7 +658,7 @@ async def test_flat_batteries_show_a_toast_but_keep_the_new_state(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     flat = AsyncMock(side_effect=BatteryTooLow("x"))
 
     with patch.object(instance, "spray_now", flat):
@@ -637,25 +685,35 @@ async def test_control_names(hass):
         assert hass.states.get(entity_id).attributes["friendly_name"] == name
 
 
-async def test_failed_poll_retries_when_the_backoff_ends(hass):
+async def test_reads_follow_the_advertisements(hass):
+    """The coordinator reads the device when an advertisement arrives and
+    the device code says a read is due (it applies the hourly read and
+    the back-off); nothing is read before the device is heard."""
+    import time
     from datetime import timedelta
+    from homeassistant.components.bluetooth import BluetoothChange
     from homeassistant.util import dt as dt_util
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
     from custom_components.godrej_aer.godrej.godrej import SmartMatic
 
     entry = make_entry(hass)
-    connect = AsyncMock(side_effect=[DeviceConnectionError("proxy not ready"), True])
-    with patch.object(SmartMatic, "retry_delay", 30.0), \
-         patch("homeassistant.components.bluetooth.async_address_present", return_value=True):
+    connect = AsyncMock(return_value=True)
+    due = [True]
+    with patch.object(SmartMatic, "needs_status_read", lambda self: due[0]):
         await setup_entry(hass, entry, connect=connect)
         with patch.object(SmartMatic, "connect_if_needed", connect):
-            assert connect.await_count == 1
-            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=20))
+            assert connect.await_count == 0
+            heard = SimpleNamespace(address=MAC, name="Smart Matic", rssi=-70, time=time.monotonic())
+            ADVERTS[-1](heard, BluetoothChange.ADVERTISEMENT)
             await hass.async_block_till_done()
             assert connect.await_count == 1
-            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=31))
+            assert entry.runtime_data.instance.heard
+
+            due[0] = False
+            async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=11))
+            ADVERTS[-1](heard, BluetoothChange.ADVERTISEMENT)
             await hass.async_block_till_done()
-            assert connect.await_count == 2  # not a minute later
+            assert connect.await_count == 1  # not due: nothing read
 
 
 # --- schedules ---------------------------------------------------------------
@@ -674,7 +732,7 @@ async def test_schedules_sensor_lists_what_the_device_holds(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     assert hass.states.get("sensor.hall_schedules").state == "unknown"
 
     instance.schedules = [_sched("daily", "08:00", "22:30", 40),
@@ -699,13 +757,13 @@ async def test_schedules_are_read_once_after_the_first_status(hass):
     entry = make_entry(hass)
     with patch.object(SmartMatic, "read_schedules", AsyncMock(return_value=[])) as read:
         await setup_entry(hass, entry)
-        instance = entry.runtime_data
+        instance = entry.runtime_data.instance
         read.assert_not_awaited()
-        instance._on_notification(C1, FRAME)
+        deliver_status(instance, FRAME)
         await hass.async_block_till_done()
         read.assert_awaited_once()
         instance.schedules = []
-        instance._on_notification(C1, FRAME)
+        deliver_status(instance, FRAME)
         await hass.async_block_till_done()
         read.assert_awaited_once()
 
@@ -715,7 +773,7 @@ async def test_schedule_actions(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
 
     with patch.object(instance, "add_schedule", AsyncMock(return_value=[])) as add:
         await hass.services.async_call(DOMAIN, "add_schedule", {
@@ -752,7 +810,7 @@ async def test_schedule_action_reports_device_failures(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     with patch.object(instance, "set_schedules", AsyncMock(side_effect=CommandNotConfirmed("x"))):
         with pytest.raises(HomeAssistantError) as err:
             await hass.services.async_call(DOMAIN, "clear_schedules", {}, blocking=True)
@@ -762,7 +820,7 @@ async def test_schedule_action_reports_device_failures(hass):
 async def test_update_status_also_reads_schedules(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
          patch.object(instance, "read_schedules", AsyncMock(return_value=[])) as read:
         await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
@@ -777,7 +835,7 @@ async def test_actions_use_the_current_target_helper(hass, caplog):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
     device = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)[0]
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
          patch.object(instance, "read_schedules", AsyncMock(return_value=[])):
         await hass.services.async_call(
@@ -792,7 +850,7 @@ async def test_update_status_button(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     button = "button.hall_update_status"
     assert er.async_get(hass).async_get(button).entity_category is er.EntityCategory.DIAGNOSTIC
     with patch.object(instance, "connect", AsyncMock(return_value=True)) as connect, \
@@ -816,12 +874,12 @@ async def test_updated_last_sensor(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     instance.schedules = []  # no startup schedule read in this test
     sensor = "sensor.hall_updated_last"
     assert hass.states.get(sensor).state == "unknown"
     assert er.async_get(hass).async_get(sensor).entity_category is er.EntityCategory.DIAGNOSTIC
-    instance._on_notification(C1, FRAME)
+    deliver_status(instance, FRAME)
     await hass.async_block_till_done()
     state = hass.states.get(sensor)
     assert state.attributes["device_class"] == "timestamp"
@@ -832,7 +890,7 @@ async def test_updated_last_sensor(hass):
 async def test_stop_schedule_action(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    with patch.object(entry.runtime_data, "stop_schedule", AsyncMock()) as stop:
+    with patch.object(entry.runtime_data.instance, "stop_schedule", AsyncMock()) as stop:
         await hass.services.async_call(DOMAIN, "stop_schedule", {"schedule": "2"}, blocking=True)
     stop.assert_awaited_once_with(2)
 
@@ -842,14 +900,14 @@ async def test_status_combines_mode_and_reachability(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     sensor = "sensor.hall_status"
     state = hass.states.get(sensor)
     assert state.attributes["options"] == ["idle", "auto", "schedule", "disconnected"]
 
     instance.set_advertising(True)  # heard
     with patch.object(instance, "read_schedules", AsyncMock()):  # read after the first status
-        instance._on_notification(C1, FRAME)  # cS 114: auto, started from an app or HA
+        deliver_status(instance, FRAME)  # cS 114: auto, started from an app or HA
         await hass.async_block_till_done()
     assert hass.states.get(sensor).state == "auto"
 
@@ -868,7 +926,7 @@ async def test_set_schedules_refuses_when_the_device_list_changed(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     expected = [{"days": ["Mon"], "start": "08:00", "end": "10:00", "interval": 20}]
     from homeassistant.exceptions import HomeAssistantError
 
@@ -888,7 +946,7 @@ async def test_auto_mode_is_refused_during_a_schedule_run(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     instance.device_status = DeviceStatus(encode_message(mT=157, mN=157, ack=200, bV=3100, cS=121))
     with patch.object(instance, "stop_spray", AsyncMock()) as off:
         await expect_unconfirmed(
@@ -922,7 +980,7 @@ async def test_diagnostics_report(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    entry.runtime_data._on_notification(C1, FRAME)
+    deliver_status(entry.runtime_data.instance, FRAME)
     await hass.async_block_till_done()
     with patch("homeassistant.components.bluetooth.async_last_service_info", return_value=None):
         report = await async_get_config_entry_diagnostics(hass, entry)
@@ -935,10 +993,14 @@ async def test_diagnostics_report(hass):
     assert report["status"]["battery_mv"] and report["status"]["raw"]
     assert set(report["connection"]) >= {"reachable", "advertising", "last_exchange_ok", "poll_failures"}
     assert report["schedules"] is None  # not read yet
+    assert set(report["clock"]) == {
+        "has_clock", "batteries_replaced_at", "device_time", "offset_seconds", "read_at",
+    }
+    assert report["clock"]["has_clock"] is True
 
     from custom_components.godrej_aer.godrej.schedule import Schedule
     from datetime import time
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     instance.schedules = [Schedule.create(["mon"], time(8), time(10), 20)]
     with patch("homeassistant.components.bluetooth.async_last_service_info", return_value=None):
         report = await async_get_config_entry_diagnostics(hass, entry)
@@ -971,8 +1033,8 @@ async def test_device_entities_are_unavailable_while_not_heard(hass, caplog):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
-    instance._on_notification(C1, FRAME)
+    instance = entry.runtime_data.instance
+    deliver_status(instance, FRAME)
     await hass.async_block_till_done()
 
     readings = ["sensor.hall_battery", "button.hall_spray_now", "button.hall_reset_refill_level",
@@ -1078,7 +1140,7 @@ async def test_update_status_action_errors(hass):
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    instance = entry.runtime_data
+    instance = entry.runtime_data.instance
     with patch.object(instance, "connect", AsyncMock(side_effect=DeviceConnectionError("gone"))):
         with pytest.raises(HomeAssistantError) as err:
             await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
@@ -1090,3 +1152,158 @@ async def test_update_status_action_errors(hass):
     with pytest.raises(ServiceValidationError) as err:
         await hass.services.async_call(DOMAIN, "update_status", {}, blocking=True)
     assert err.value.translation_key == "no_devices_matched"
+
+
+async def test_update_entity_reads_the_device_now(hass, caplog):
+    """update_entity on any of its entities reads the status and schedules,
+    as Update status does; a failure is logged briefly, not raised."""
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(hass, "homeassistant", {})
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data.instance
+
+    async def slow_read(**_kwargs):
+        await asyncio.sleep(0.05)  # a read takes a while: the second joins it
+        return True
+
+    with patch.object(instance, "connect", AsyncMock(side_effect=slow_read)) as connect, \
+         patch.object(instance, "read_schedules", AsyncMock(return_value=[])) as read:
+        await hass.services.async_call(
+            "homeassistant", "update_entity",
+            {"entity_id": ["sensor.hall_schedules", "sensor.hall_battery"]}, blocking=True,
+        )
+    assert connect.await_count == 1  # both entities share one read
+    read.assert_awaited_once()
+
+    caplog.clear()
+    with patch.object(instance, "connect", AsyncMock(side_effect=DeviceConnectionError("gone"))):
+        await hass.services.async_call(
+            "homeassistant", "update_entity", {"entity_id": "sensor.hall_schedules"}, blocking=True,
+        )
+    assert "Could not update" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+async def test_status_is_read_around_each_schedule_start_and_end(hass, freezer):
+    from datetime import timedelta
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+    from custom_components.godrej_aer.godrej.events import DEVICE_SCHEDULES_UPDATE
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data.instance
+    instance.set_advertising(True)
+    now = dt_util.now()
+    start = (now + timedelta(minutes=2)).replace(second=0, microsecond=0)
+    end = start + timedelta(minutes=20)
+    day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][start.weekday()]
+    instance.schedules = [_sched([day], f"{start:%H:%M}", f"{end:%H:%M}", 20)]
+    with patch.object(instance, "watch_schedule_change") as watch:
+        instance.eventbus.send(DEVICE_SCHEDULES_UPDATE, instance)
+        await hass.async_block_till_done()
+        freezer.move_to(start + timedelta(seconds=1))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        watch.assert_called_once_with(starting=True)
+        freezer.move_to(end + timedelta(seconds=1))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        assert watch.call_args_list[-1].kwargs == {"starting": False}
+
+
+
+async def test_a_device_without_a_clock_has_no_schedules(hass):
+    """No Schedules sensor (an old one is removed), and the schedule
+    actions say why they can't be used."""
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.helpers import entity_registry as er
+
+    entry = make_entry(hass, has_clock=False)
+    er.async_get(hass).async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_schedules", config_entry=entry,
+        suggested_object_id="hall_schedules",
+    )
+    await setup_entry(hass, entry)
+    assert hass.states.get("sensor.hall_schedules") is None
+    assert er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_schedules") is None
+    assert hass.states.get("sensor.hall_status").attributes["has_clock"] is False
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, "add_schedule", {
+            "days": ["mon"], "start": "07:00", "end": "14:00", "interval": "10",
+        }, blocking=True)
+    assert err.value.translation_key == "no_clock"
+
+
+
+async def test_status_shows_whether_the_device_keeps_time(hass):
+    entry = make_entry(hass)  # from before the check: taken to keep time
+    await setup_entry(hass, entry)
+    assert hass.states.get("sensor.hall_status").attributes["has_clock"] is True
+
+
+
+async def test_a_press_that_waits_too_long_says_the_device_is_busy(hass):
+    """It didn't get its turn within 5 s: not an unreachable device."""
+    from homeassistant.exceptions import HomeAssistantError
+    from custom_components.godrej_aer.godrej.exception import DeviceBusy
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data.instance
+    with patch.object(instance, "spray_now", AsyncMock(side_effect=DeviceBusy("busy"))):
+        with pytest.raises(HomeAssistantError) as err:
+            await hass.services.async_call(
+                "button", "press", {"entity_id": "button.hall_spray_now"}, blocking=True
+            )
+    assert err.value.translation_key == "device_busy"
+
+
+
+def battery_frame(mv):
+    from test_devicestatus_frame import FRAME
+
+    at = FRAME.index(b"bbV\x1a") + 4
+    return FRAME[:at] + mv.to_bytes(4, "big") + FRAME[at + 4:]
+
+
+async def test_batteries_replaced_sensor(hass):
+    """Diagnostic; unknown until new batteries are seen, then their time."""
+    from homeassistant.const import EntityCategory
+    from homeassistant.helpers import entity_registry as er
+
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data.instance
+    entity = er.async_get(hass).async_get("sensor.hall_batteries_replaced")
+    assert entity.entity_category is EntityCategory.DIAGNOSTIC
+    assert hass.states.get("sensor.hall_batteries_replaced").state == "unknown"
+
+    with patch.object(instance, "check_clock", AsyncMock()) as clock:
+        deliver_status(instance, battery_frame(2650))  # about 68 %
+        deliver_status(instance, battery_frame(3120))  # 100 %
+        await hass.async_block_till_done()
+    clock.assert_awaited_once()
+    state = hass.states.get("sensor.hall_batteries_replaced")
+    assert state.state not in ("unknown", "unavailable")
+
+
+async def test_a_swap_while_home_assistant_was_down_is_seen(hass):
+    from homeassistant.core import State
+    from pytest_homeassistant_custom_component.common import mock_restore_cache_with_extra_data
+
+    mock_restore_cache_with_extra_data(hass, [(
+        State("sensor.hall_batteries_replaced", "2026-09-01T10:00:00+00:00"), {"percent": 60},
+    )])
+    entry = make_entry(hass)
+    await setup_entry(hass, entry)
+    instance = entry.runtime_data.instance
+    assert hass.states.get("sensor.hall_batteries_replaced").state == "2026-09-01T10:00:00+00:00"
+    assert instance.restored_battery_percent == 60
+    with patch.object(instance, "check_clock", AsyncMock()):
+        deliver_status(instance, battery_frame(3120))
+        await hass.async_block_till_done()
+    assert hass.states.get("sensor.hall_batteries_replaced").state != "2026-09-01T10:00:00+00:00"

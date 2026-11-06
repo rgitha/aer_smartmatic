@@ -6,15 +6,15 @@ from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .entity import AcceptedButFlat, async_device_device_info_fn, async_send_command
-from .godrej import SmartMatic, DeviceStatus
+from .coordinator import SmartMaticCoordinator
+from .entity import AcceptedButFlat, SmartMaticEntity, async_send_command
+from .godrej import DeviceStatus
+from .godrej.exception import ScheduleRunning
 from .godrej.const import SPRAY_INTERVALS
-from .godrej.events import DEVICE_REACHABILITY, DEVICE_STATUS_UPDATE
 
 OFF = "Off"
 _INTERVAL_BY_OPTION = {f"Every {minutes} min": minutes for minutes in SPRAY_INTERVALS}
@@ -30,11 +30,11 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    instance: SmartMatic = config_entry.runtime_data
-    async_add_entities([SmartMaticAutoSpraySelect(instance, config_entry)])
+    coordinator: SmartMaticCoordinator = config_entry.runtime_data
+    async_add_entities([SmartMaticAutoSpraySelect(coordinator)])
 
 
-class SmartMaticAutoSpraySelect(SelectEntity):
+class SmartMaticAutoSpraySelect(SmartMaticEntity, SelectEntity):
     """Auto-spray mode: Off, or every 10, 20 or 40 minutes.
 
     One setting, as on the device. The state is what the device reports,
@@ -43,17 +43,17 @@ class SmartMaticAutoSpraySelect(SelectEntity):
     cycle with a spray. Off is always sent (it also clears the lights).
     """
 
+    _key = "spray_mode"
     _attr_translation_key = "spray_mode"
     _attr_options = [OFF, *_INTERVAL_BY_OPTION]
 
-    def __init__(self, instance: SmartMatic, config_entry: ConfigEntry):
-        self._instance = instance
-        self._config_entry = config_entry
-        self._attr_has_entity_name = True
-        self._attr_unique_id = f"{config_entry.entry_id}_spray_mode"
-        self._apply_status(instance.device_status)
+    def __init__(self, coordinator: SmartMaticCoordinator) -> None:
+        super().__init__(coordinator)
+        self._applied: DeviceStatus | None = None
+        self._apply_status(self._instance.device_status)
 
     def _apply_status(self, status: DeviceStatus | None) -> None:
+        self._applied = status
         if status is None or status.current_status is None:
             self._attr_current_option = None
             self._attr_extra_state_attributes = {}
@@ -64,59 +64,34 @@ class SmartMaticAutoSpraySelect(SelectEntity):
             self._attr_current_option = OFF
         self._attr_extra_state_attributes = {"started_by": status.spray_source}
 
-    @property
-    def available(self) -> bool:
-        return self._instance.heard
-
-    async def async_added_to_hass(self) -> None:
-        self._instance.eventbus.add_listener(
-            DEVICE_STATUS_UPDATE, self.on_status_update
-        )
-        self._instance.eventbus.add_listener(DEVICE_REACHABILITY, self._on_reachability)
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._instance.eventbus.remove_listener(
-            DEVICE_STATUS_UPDATE, self.on_status_update
-        )
-        self._instance.eventbus.remove_listener(DEVICE_REACHABILITY, self._on_reachability)
-
-    async def _on_reachability(self, _instance: SmartMatic) -> None:
-        self.async_write_ha_state()
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return async_device_device_info_fn(
-            self._instance, self._config_entry.data[CONF_NAME]
-        )
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Only a new status changes the option: after a choice is
+        # acknowledged it stays shown until the status read-back.
+        if self._instance.device_status is not self._applied:
+            self._apply_status(self._instance.device_status)
+        super()._handle_coordinator_update()
 
     async def async_select_option(self, option: str) -> None:
         _LOGGER.debug("%s: Spray: auto set to %s", self._config_entry.data[CONF_NAME], option)
-        status = self._instance.device_status
-        if status is not None and status.spray_source == "schedule":
-            # The device ignores other intervals during a run, and Off only
-            # pauses it: Skip schedule run is the way to stop one.
-            self.async_write_ha_state()
-            raise HomeAssistantError(
-                translation_domain=DOMAIN, translation_key="auto_during_schedule"
-            )
-        if (
-            option != OFF
-            and status is not None
-            and status.is_spraying
-            and _OPTION_BY_INTERVAL.get(status.spray_interval) == option
-        ):
-            _LOGGER.debug("Already spraying every %s min; nothing sent", status.spray_interval)
-            return
-        if option == OFF:
-            command = self._instance.stop_spray()
-        else:
-            command = self._instance.set_spray_interval(_INTERVAL_BY_OPTION[option])
+        # Judged on a fresh status, read just before in the same step: the
+        # device refuses Auto during a schedule run (Off only pauses one;
+        # Skip is the way to stop it), and an interval already running
+        # isn't re-sent (that would restart it with an extra spray).
+        command = self._instance.choose_auto(
+            None if option == OFF else _INTERVAL_BY_OPTION[option]
+        )
         # Show the option once the device acknowledges it; otherwise
         # re-write the current one (the dropdown reverts) and raise. The
         # status read-back that follows shows what the device really does
         # (e.g. it ignores a different interval during a schedule run).
         try:
             await async_send_command(command)
+        except ScheduleRunning as err:
+            self.async_write_ha_state()
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="auto_during_schedule"
+            ) from err
         except AcceptedButFlat:
             # The device did switch modes; it just can't spray.
             self._attr_current_option = option
@@ -126,8 +101,4 @@ class SmartMaticAutoSpraySelect(SelectEntity):
             self.async_write_ha_state()
             raise
         self._attr_current_option = option
-        self.async_write_ha_state()
-
-    async def on_status_update(self, device_status: DeviceStatus) -> None:
-        self._apply_status(device_status)
         self.async_write_ha_state()

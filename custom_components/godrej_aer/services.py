@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.service import async_extract_config_entry_ids
 
 from .const import DOMAIN
+from .coordinator import coordinator_for
 from .entity import async_send_command, device_name, update_failed
 from .godrej import SmartMatic
 from .godrej.const import SPRAY_INTERVALS
@@ -105,9 +106,9 @@ async def _async_matched_instances(
             continue
         if entry_ids and entry.entry_id not in entry_ids:
             continue
-        instance: SmartMatic | None = getattr(entry, "runtime_data", None)
-        if instance is not None:
-            instances.append(instance)
+        coordinator = coordinator_for(entry)
+        if coordinator is not None:
+            instances.append(coordinator.instance)
 
     return instances
 
@@ -128,10 +129,13 @@ def async_setup_services(hass: HomeAssistant) -> None:
             )
 
         async def _update(instance: SmartMatic) -> None:
-            await instance.connect(purpose="update status")
-            # Only the status read decides whether this failed; a firmware
-            # that does not answer the schedule request is fine.
-            await instance.read_schedules_quietly()
+            # The status, then the schedules (only the status read decides
+            # whether this failed). Shared with update_entity and the button.
+            for entry in hass.config_entries.async_entries(DOMAIN):
+                coordinator = coordinator_for(entry)
+                if coordinator is not None and coordinator.instance is instance:
+                    await coordinator.async_update_now()
+                    return
 
         results = await asyncio.gather(
             *(_update(instance) for instance in instances),

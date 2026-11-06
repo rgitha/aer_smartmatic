@@ -1,19 +1,17 @@
 """The Godrej Aer Smart Matic integration."""
 from __future__ import annotations
-from datetime import datetime, timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, CONF_MAC
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.components import bluetooth
-from homeassistant.components.bluetooth.match import ADDRESS, BluetoothCallbackMatcher
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
-from .const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR
+from .const import CONF_COMMAND_CHAR, CONF_HAS_CLOCK, CONF_REPLY_CHAR
 from .const import DOMAIN
+from .coordinator import SmartMaticCoordinator
 from .godrej import SmartMatic
 from .godrej.events import DEVICE_STATUS_UPDATE
 from .services import async_setup_services
@@ -50,19 +48,10 @@ async def async_setup_entry(
         mac,
         command_char=entry.data.get(CONF_COMMAND_CHAR),
         reply_char=entry.data.get(CONF_REPLY_CHAR),
+        has_clock=entry.data.get(CONF_HAS_CLOCK, True),
     )
-    entry.runtime_data = instance
-
-    retry_timer = None
-
-    @callback
-    def _cancel_retry_timer() -> None:
-        nonlocal retry_timer
-        if retry_timer is not None:
-            retry_timer()
-            retry_timer = None
-
-    entry.async_on_unload(_cancel_retry_timer)
+    coordinator = SmartMaticCoordinator(hass, entry, instance)
+    entry.runtime_data = coordinator
 
     async def _read_schedules() -> None:
         _LOGGER.debug("Reading the schedules of %s after startup", mac)
@@ -75,7 +64,7 @@ async def async_setup_entry(
         # Read the device's own schedules once, after the first status
         # shows it is reachable; later changes read them back themselves.
         instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
-        if instance.schedules is None:
+        if instance.schedules is None and instance.has_clock:
             entry.async_create_background_task(
                 hass, _read_schedules(), f"godrej_aer schedules {mac}"
             )
@@ -85,65 +74,12 @@ async def async_setup_entry(
         lambda: instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
     )
 
-    async def _connect_if_needed() -> None:
-        nonlocal retry_timer
-        if bluetooth.async_address_present(hass, mac, connectable=True):
-            try:
-                await instance.connect_if_needed()
-            except Exception as e:
-                _LOGGER.debug("Background status read for %s failed: %s", mac, e)
-                # Retry exactly when the backoff ends, not at the next
-                # periodic tick (up to a minute later).
-                delay = instance.retry_delay
-                if delay is not None:
-                    _cancel_retry_timer()
-                    retry_timer = async_call_later(hass, delay + 0.5, _retry_now)
-
-    @callback
-    def _retry_now(_now: datetime) -> None:
-        nonlocal retry_timer
-        retry_timer = None
-        _LOGGER.debug("Retrying %s after the backoff", mac)
-        _schedule_connect()
-
-    @callback
-    def _schedule_connect() -> None:
-        # Don't delay startup; cancelled on unload.
-        entry.async_create_background_task(
-            hass, _connect_if_needed(), f"godrej_aer connect {mac}"
-        )
-
-    @callback
-    def _async_discovered_device(
-        service_info: bluetooth.BluetoothServiceInfoBleak,
-        change: bluetooth.BluetoothChange
-    ) -> None:
-        """Subscribe to bluetooth changes."""
-        instance.set_advertising(True)
-        _schedule_connect()
-
-    @callback
-    def _async_device_unavailable(
-        service_info: bluetooth.BluetoothServiceInfoBleak,
-    ) -> None:
-        # No advertisements for a while: out of range or out of battery.
-        instance.set_advertising(False)
-
-    entry.async_on_unload(
-        bluetooth.async_register_callback(
-            hass,
-            _async_discovered_device,
-            BluetoothCallbackMatcher({ADDRESS: mac}),
-            bluetooth.BluetoothScanningMode.PASSIVE
-        )
-    )
-    entry.async_on_unload(
-        bluetooth.async_track_unavailable(
-            hass, _async_device_unavailable, mac, connectable=True
-        )
-    )
-
     registry = er.async_get(hass)
+    if not instance.has_clock:
+        # Found to have no clock (Reconfigure): no schedules to show.
+        old = registry.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_schedules")
+        if old:
+            registry.async_remove(old)
     for platform, key in _REPLACED_ENTITIES:
         old = registry.async_get_entity_id(platform, DOMAIN, f"{entry.entry_id}_{key}")
         if old:
@@ -151,16 +87,8 @@ async def async_setup_entry(
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-
-    @callback
-    def _async_periodic_connect(_now: datetime) -> None:
-        _schedule_connect()
-
-    entry.async_on_unload(
-        async_track_time_interval(hass, _async_periodic_connect, timedelta(seconds=60))
-    )
-
-    _schedule_connect()
+    # Reads start with the device's next advertisement.
+    entry.async_on_unload(coordinator.async_start())
 
     return True
 
@@ -168,8 +96,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        instance: SmartMatic = entry.runtime_data
-        await instance.shutdown()
+        coordinator: SmartMaticCoordinator = entry.runtime_data
+        await coordinator.instance.shutdown()
     return unload_ok
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

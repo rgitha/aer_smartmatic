@@ -78,8 +78,10 @@ class FakeDevice:
     """A Smart Matic that answers on ``command_char`` (one or a tuple).
 
     Commands are acknowledged (reply mT = request mT + 50) with ``ack``,
-    or not at all if it is None. ``echo_mn``: the status reply carries the
-    request's mN. ``reply_delay``: seconds before the status reply.
+    or not at all if it is None. ``echo_mn``: replies carry the request's
+    mN, as fw 3.0.8-IN does (False: they carry their reply type, like a
+    firmware that doesn't copy it). ``reply_delay``: seconds before the
+    status reply.
 
     ``via_proxy``: start_notify fails on characteristics without a CCCD
     (6e400001), as bleak-esphome does on v3 proxy connections.
@@ -88,14 +90,24 @@ class FakeDevice:
     ``lists_schedules``: answers the retrieve-schedules message (109), as
     fw 3.0.8-IN does; other firmwares stay silent. ``stores_schedules``:
     acknowledges the upload (103) as well.
+    ``clock_offset``: answers the read-clock message (114) with its clock
+    this many seconds off Home Assistant's; None: doesn't answer. A device
+    whose clock was never set reads 1970. Clock reads are kept apart from
+    ``writes`` (in ``clock_reads``). ``set_time_ack``: its answer to the
+    set-time message (102 -> 152), None: none; setting it puts the clock
+    right.
     """
 
     def __init__(
         self, *, command_char, status_frame, reply_char=C1,
         via_proxy=True, chunk=182, needs_time=False, extra_chars=(),
-        ack=200, echo_mn=False, reply_delay=0.0,
-        lists_schedules=True, stores_schedules=True,
+        ack=200, echo_mn=True, reply_delay=0.0,
+        lists_schedules=True, stores_schedules=True, clock_offset=0.0,
+        set_time_ack=200,
     ):
+        self.clock_offset = clock_offset
+        self.set_time_ack = set_time_ack
+        self.clock_reads = []
         self.lists_schedules = lists_schedules
         self.stores_schedules = stores_schedules
         self.command_char = command_char
@@ -123,6 +135,7 @@ class FakeDevice:
         self.subscribe_attempts = []
         self.broken_notify = set()
         self.writes = []
+        self.sent_mns = []
         self.stored_schedules = []  # 5-byte entries, as the device holds them
 
     def make_client(self, disconnected_callback):
@@ -138,8 +151,29 @@ class FakeDevice:
 
         asyncio.get_running_loop().call_later(delay, send)
 
+    def reply_mn(self, payload):
+        """The mN a reply to ``payload`` carries."""
+        message = cbor.loads(bytes(payload))
+        return message["mN"] if self.echo_mn else message["mT"] + 50
+
     def on_write(self, uuid, payload):
-        self.writes.append((uuid, bytes(payload)))
+        if cbor.loads(bytes(payload)).get("mT") == 114:
+            self.clock_reads.append(uuid)
+            if self.clock_offset == "refuse":
+                self._notify(self.reply_char, gm.encode_message(mT=164, mN=self.reply_mn(payload), ack=400))
+            elif self.clock_offset is not None:
+                if self.needs_time and not self.time_set:
+                    seconds = 0  # never set: 1970
+                else:
+                    local = gm.dt_util.now().replace(tzinfo=None)
+                    seconds = int((local - gm.datetime(1970, 1, 1)).total_seconds() + self.clock_offset)
+                self._notify(self.reply_char, gm.encode_message(mT=164, mN=self.reply_mn(payload), ack=200, tID=seconds))
+            return
+        # Kept with the reply type as mN (as the messages are built), so
+        # tests can compare them with the constants; the numbers sent are
+        # in ``sent_mns``.
+        self.sent_mns.append(cbor.loads(bytes(payload))["mN"])
+        self.writes.append((uuid, plain(payload)))
         accepted = (
             self.command_char if isinstance(self.command_char, tuple)
             else (self.command_char,)
@@ -149,19 +183,27 @@ class FakeDevice:
         message = cbor.loads(bytes(payload))
         mt = message["mT"]
         if mt == 102:  # set time
-            self.time_set = True
+            if self.set_time_ack is not None:
+                if self.set_time_ack == 200:
+                    self.time_set = True
+                    if isinstance(self.clock_offset, (int, float)):
+                        self.clock_offset = 0.0
+                self._notify(
+                    self.reply_char,
+                    gm.encode_message(mT=152, mN=self.reply_mn(payload), ack=self.set_time_ack),
+                )
+            else:
+                self.time_set = True
         elif mt == 107:
             if self.status_frame and (self.time_set or not self.needs_time):
                 frame = self.status_frame
                 if self.echo_mn:
-                    frame = frame.replace(
-                        bytes.fromhex("626d4e189d"),
-                        bytes.fromhex("626d4e18") + bytes([message["mN"]]), 1,
-                    )
+                    at = frame.find(bytes.fromhex("626d4e18")) + 4
+                    frame = frame[:at] + bytes([message["mN"]]) + frame[at + 1:]
                 self._notify(self.reply_char, frame, self.reply_delay)
         elif mt == 109 and self.ack is not None:
             if self.lists_schedules:
-                self._notify(self.reply_char, schedule_reply(self.stored_schedules))
+                self._notify(self.reply_char, schedule_reply(self.stored_schedules, self.reply_mn(payload)))
         elif mt == 103 and not self.stores_schedules:
             pass  # takes the upload, never answers
         elif self.ack is not None:
@@ -175,14 +217,20 @@ class FakeDevice:
                 ]
             self._notify(
                 self.reply_char,
-                gm.encode_message(mT=mt + 50, mN=mt + 50, ack=self.ack),
+                gm.encode_message(mT=mt + 50, mN=self.reply_mn(payload), ack=self.ack),
             )
 
 
-def schedule_reply(entries):
+def plain(payload):
+    """``payload`` with the reply type as its mN, as the constants hold it."""
+    message = cbor.loads(bytes(payload))
+    return gm.with_mn(bytes(payload), message["mT"] + 50)
+
+
+def schedule_reply(entries, mn=159):
     """The device's answer to "retrieve schedules" (109 -> 159)."""
     out = bytearray([0xBF])
-    for key, value in (("mT", 159), ("mN", 159), ("ack", 200)):
+    for key, value in (("mT", 159), ("mN", mn), ("ack", 200)):
         out += gm._cbor_key(key) + gm._cbor_uint(value)
     out += gm._cbor_key("S") + bytes([0x9F])
     for entry in entries:
@@ -264,11 +312,11 @@ async def test_detect_accepts_working_defaults(monkeypatch):
     device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
     matic = attach(monkeypatch, device)
 
-    assert await matic.detect_channels() == (C2, C1)
+    assert await matic.detect_channels() == (C3, C1)
     assert device.subscribe_attempts == [C1]  # only the default reply channel
     assert device.raw_subscriptions == [C1]  # via the CCCD-less fallback
-    assert probes(device) == [C2]
-    assert device.writes[0] == (C2, gm.FETCH_STATUS_MSG)  # the app's request
+    assert probes(device) == [C3]
+    assert device.writes[0] == (C3, gm.FETCH_STATUS_MSG)  # the app's request
     assert device.time_set
     assert matic.device_status.firmware_version == "3.0.8-IN"
     assert matic.client is None  # disconnected afterwards
@@ -280,7 +328,7 @@ async def test_detect_falls_back_to_probing(monkeypatch):
     matic = attach(monkeypatch, device)
 
     assert await matic.detect_channels() == (C4, C1)
-    assert probes(device) == [C2, C2, C3, C4]  # defaults, then each candidate
+    assert probes(device) == [C3, C3, C2, C4]  # defaults, then each candidate
     assert set(device.subscribe_attempts) == {C1, C2, C3, C4}
     assert device.time_set
 
@@ -302,7 +350,7 @@ async def test_detect_finds_replies_on_another_characteristic(monkeypatch):
     matic = attach(monkeypatch, device)
 
     assert await matic.detect_channels() == (C2, C2)
-    assert probes(device) == [C2, C2]
+    assert probes(device) == [C3, C3, C2]
 
 
 async def test_detect_device_that_needs_time_first(monkeypatch):
@@ -310,7 +358,7 @@ async def test_detect_device_that_needs_time_first(monkeypatch):
     matic = attach(monkeypatch, device)
 
     assert await matic.detect_channels() == (C4, C1)
-    assert probes(device) == [C2, C2, C3, C4, C2, C3, C4]
+    assert probes(device) == [C3, C3, C2, C4, C3, C2, C4]
 
 
 async def test_detect_matches_late_replies_by_message_number(monkeypatch):
@@ -407,17 +455,17 @@ async def test_broken_saved_reply_channel_has_no_fallback(monkeypatch):
 
 
 async def test_entry_without_saved_channels_uses_the_defaults(monkeypatch, caplog):
-    """Devices added before detection existed use 0002/0001."""
+    """Devices added before detection existed use the defaults, 0003/0001."""
     device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
     matic = attach(monkeypatch, device)
     caplog.set_level("WARNING", logger=gm.__name__)
 
-    assert (matic.command_char, matic.reply_char) == (C2, C1)
+    assert (matic.command_char, matic.reply_char) == (C3, C1)
     assert await matic.connect(status_timeout=5)
     assert device.subscribe_attempts == [C1]
     await matic.spray_now()
     await matic._refresh_task
-    assert {uuid for uuid, _ in device.writes} == {C2}
+    assert {uuid for uuid, _ in device.writes} == {C3}
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
@@ -429,9 +477,9 @@ async def test_actions_never_probe(monkeypatch):
         device.writes.clear()
         with pytest.raises(CommandNotConfirmed):
             await matic.spray_now()
-        assert device.writes[0] == (C2, gm.SPRAY_NOW_MSG)
+        assert device.writes[0] == (C3, gm.SPRAY_NOW_MSG)
     matic._refresh_task.cancel()
-    assert set(probes(device)) <= {C2}
+    assert set(probes(device)) <= {C3}
 
 
 async def test_startup_failure_cooldown_and_logging(monkeypatch, caplog):
@@ -471,7 +519,7 @@ async def test_press_subscribes_before_writing(monkeypatch):
     on_write = device.on_write
 
     def record(uuid, payload):
-        if payload == gm.SPRAY_NOW_MSG:
+        if plain(payload) == gm.SPRAY_NOW_MSG:
             subscribed_at_write.append(set(device.callbacks))
         on_write(uuid, payload)
 
@@ -521,7 +569,7 @@ async def test_each_command_waits_for_its_own_ack(monkeypatch, caplog, action, m
     await matic._refresh_task
     assert cbor.loads(device.writes[0][1])["mT"] == mt
     assert any(r.message.endswith(f"acknowledged by {matic.mac}") for r in caplog.records)
-    assert matic._ack_waiters == {}
+    assert matic._waiters == {}
 
 
 async def test_missing_ack_raises_and_still_reads_back(monkeypatch):
@@ -533,7 +581,7 @@ async def test_missing_ack_raises_and_still_reads_back(monkeypatch):
     await matic._refresh_task
     assert probes(device) == [C4]  # the read-back shows what happened
     assert matic.device_status.battery_mv == 3170
-    assert matic._ack_waiters == {}
+    assert matic._waiters == {}
 
 
 async def test_rejected_command_raises(monkeypatch, caplog):
@@ -544,7 +592,7 @@ async def test_rejected_command_raises(monkeypatch, caplog):
     with pytest.raises(CommandNotConfirmed):
         await matic.reset_refill()
     await matic._refresh_task
-    assert any("Refill reset rejected" in r.message for r in caplog.records)
+    assert any("Refill reset refused" in r.message for r in caplog.records)
 
 
 async def test_failed_write_raises(monkeypatch):
@@ -553,7 +601,7 @@ async def test_failed_write_raises(monkeypatch):
     on_write = device.on_write
 
     def fail_spray(uuid, payload):
-        if payload == gm.SPRAY_NOW_MSG:
+        if plain(payload) == gm.SPRAY_NOW_MSG:
             raise Exception("write failed")
         on_write(uuid, payload)
 
@@ -585,7 +633,7 @@ async def test_overlapping_commands_are_each_confirmed(monkeypatch):
     )
     await matic._refresh_task
     assert len([w for w in device.writes if cbor.loads(w[1])["mT"] != 107]) == 4
-    assert matic._ack_waiters == {}
+    assert matic._waiters == {}
 
 
 async def test_unreachable_device_fails_queued_commands_at_once(monkeypatch):
@@ -689,32 +737,6 @@ async def test_press_gives_up_but_the_attempt_carries_on(monkeypatch):
     assert clients and not clients[0].is_connected  # the late link was closed
     assert matic.client is None
     assert gm.SPRAY_NOW_MSG not in [p for _, p in device.writes]  # not sent late
-
-
-async def test_a_press_during_a_slow_background_read_answers_quickly(monkeypatch):
-    """The background read waits for the link without holding the lock, so
-    a press joins the same attempt and still answers within its limit."""
-    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
-    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
-    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
-    never = asyncio.Event()
-    calls = []
-
-    async def hang(*args, **kwargs):
-        calls.append(1)
-        await never.wait()
-
-    monkeypatch.setattr(gm, "establish_connection", hang)
-    poll = asyncio.ensure_future(matic.connect_if_needed())
-    await asyncio.sleep(0)
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    with pytest.raises(DeviceConnectionError):
-        await matic.spray_now()
-    assert loop.time() - start < 0.5
-    assert calls == [1]  # joined, not a second attempt
-    poll.cancel()
-    matic._link_task.cancel()
 
 
 async def test_unloading_ends_an_attempt_in_flight(monkeypatch):
@@ -912,21 +934,19 @@ async def test_background_check_recovers_after_a_failed_press(monkeypatch):
     assert not await matic.connect_if_needed()  # and quiet again
 
 
-async def test_press_during_a_slow_status_reply_is_not_held_up(monkeypatch):
+async def test_a_press_waits_for_a_status_reply_in_progress(monkeypatch):
     device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN, reply_delay=0.5)
     matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
     monkeypatch.setattr(gm, "SET_TIME_PACING", 0)
-    loop = asyncio.get_running_loop()
 
     poll = asyncio.ensure_future(matic.connect(status_timeout=5))
     while not any(cbor.loads(p)["mT"] == 107 for _, p in device.writes):
         await asyncio.sleep(0.01)  # the poll is now waiting for its reply
-    start = loop.time()
     await matic.spray_now()
-    assert loop.time() - start < 0.3  # well before the 0.5 s reply
-    assert await poll
+    assert poll.done() and await poll  # the reply came first
+    kinds = [cbor.loads(p)["mT"] for _, p in device.writes]
+    assert kinds.index(107) < kinds.index(104)
     matic._refresh_task.cancel()
-
 
 async def test_press_cancels_a_pending_disconnect(monkeypatch):
     device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
@@ -948,18 +968,31 @@ async def test_stale_fragment_does_not_corrupt_next_frame(monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(gm.time, "monotonic", lambda: clock[0])
 
+    waiter = gm._Waiter(157, "Status request", asyncio.get_running_loop().create_future())
+    matic._waiters[157] = waiter  # the frame's mN
     matic._on_notification(C1, FRAME_308_IN[:30])  # partial, never finished
     clock[0] += gm._FRAGMENT_TIMEOUT + 1
     matic._on_notification(C1, FRAME_308_IN)
     assert matic.device_status is not None and matic.device_status.is_valid
+    assert waiter.future.done()
     assert matic._rx_buffers == {}
 
 
 async def test_acks_do_not_count_as_status(monkeypatch):
     matic = gm.SmartMatic(hass=None, mac="A4:C1:38:CB:03:37")
+    waiter = gm._Waiter(157, "Status request", asyncio.get_running_loop().create_future())
+    matic._waiters[157] = waiter
     matic._on_notification(C1, SPRAY_ACK)
     assert matic.device_status is None
-    assert not matic._device_status_event.is_set()
+    assert not waiter.future.done()
+
+
+async def test_a_status_reply_nobody_asked_for_is_ignored(monkeypatch):
+    """It answers a read that already gave up, so it's older than what's
+    shown: a stale "idle" mustn't overwrite a newer read."""
+    matic = gm.SmartMatic(hass=None, mac="A4:C1:38:CB:03:37")
+    matic._on_notification(C1, FRAME_308_IN)
+    assert matic.device_status is None
 
 
 # --- reachability -----------------------------------------------------------
@@ -1061,9 +1094,10 @@ async def test_detect_reports_each_stage(monkeypatch):
     assert stages == [
         ("connecting", {}, 0.0),
         ("checking_defaults", {}, 0.0),
-        ("probing", {"index": "1", "total": "3", "channel": "6e400002"}, 0.0),
-        ("probing", {"index": "2", "total": "3", "channel": "6e400003"}, 1 / 6),
+        ("probing", {"index": "1", "total": "3", "channel": "6e400003"}, 0.0),
+        ("probing", {"index": "2", "total": "3", "channel": "6e400002"}, 1 / 6),
         ("probing", {"index": "3", "total": "3", "channel": "6e400004"}, 2 / 6),
+        ("checking_clock", {}, 1.0),
     ]
 
 
@@ -1083,7 +1117,7 @@ async def test_detect_probes_unknown_writable_characteristics_last(monkeypatch):
     matic = attach(monkeypatch, device)
 
     assert await matic.detect_channels() == (C5, C1)
-    assert probes(device) == [C2, C2, C3, C4, C5]
+    assert probes(device) == [C3, C3, C2, C4, C5]
 
 
 async def test_detect_skips_known_channels_the_device_lacks(monkeypatch):
@@ -1095,7 +1129,7 @@ async def test_detect_skips_known_channels_the_device_lacks(monkeypatch):
     matic = attach(monkeypatch, device)
 
     assert await matic.detect_channels() == (C4, C1)
-    assert probes(device) == [C2, C4]  # the default is tried regardless
+    assert probes(device) == [C3, C4]  # the default is tried regardless
 
 
 class CountingService(FakeService):
@@ -1200,6 +1234,40 @@ async def test_identify_does_not_stop_an_interval_picked_during_its_wait(monkeyp
     await asyncio.wait_for(picking, 1)
     await matic._refresh_task
     # LED test, the auto off clearing the lights, then every 10 min
+    assert commands(device) == [113, 106, 104]
+
+
+async def test_an_interval_picked_while_identify_checks_waits_for_it(monkeypatch):
+    """Picked while Identify is still reading the status: before, it could
+    slip in after Identify's idle check, start, and then be switched off
+    by the "auto off" that clears the lights. Now it waits its turn."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic, lit, release = idle_identify(monkeypatch, device, gate_wait=True)
+    quick_status = matic.connect.side_effect
+    reading = asyncio.Event()
+    answered = asyncio.Event()
+
+    async def slow_status(**kwargs):
+        reading.set()
+        await answered.wait()  # the status reply takes a moment
+        await quick_status(**kwargs)
+
+    matic.connect.side_effect = slow_status
+
+    identifying = asyncio.create_task(matic.identify())
+    await asyncio.wait_for(reading.wait(), 1)  # Identify is reading the status
+    picking = asyncio.create_task(matic.set_spray_interval(10))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    answered.set()
+    await asyncio.wait_for(lit.wait(), 1)
+    assert commands(device) == [113]  # the interval hasn't slipped in
+
+    release.set()
+    await asyncio.wait_for(identifying, 1)
+    await asyncio.wait_for(picking, 1)
+    await matic._refresh_task
+    # LED test, the auto off clearing the lights, then every 10 min last
     assert commands(device) == [113, 106, 104]
 
 
@@ -1312,7 +1380,7 @@ async def test_set_schedules_replaces_the_list_like_the_app(monkeypatch):
     result = await matic.set_schedules(wanted)
     assert result == wanted and matic.schedules == wanted
     # Remove all, upload on 6e400004, read back.
-    assert schedule_writes(device) == [(C2, 108), (C4, 103), (C2, 109)]
+    assert schedule_writes(device) == [(C3, 108), (C4, 103), (C3, 109)]
     assert device.stored_schedules == [s.to_bytes() for s in wanted]
     await asyncio.sleep(0)
     assert events
@@ -1594,3 +1662,591 @@ async def test_a_schedule_the_device_drops_is_reported(monkeypatch):
     too_many = S(("mon",), dtime(23, 0), 40, 250)  # built directly: create() caps it
     with pytest.raises(SchedulesNotStored):
         await matic.set_schedules([too_many])
+
+
+def test_next_change_finds_the_next_start_or_end():
+    from datetime import datetime
+    from godrej.schedule import next_change
+
+    weekdays = sched(["mon", "tue", "wed", "thu", "fri"], "07:00", "10:00", 20)
+    night = sched(["sat"], "23:00", "01:00", 20)  # ends on Sunday at 01:00
+    wed_8 = datetime(2026, 11, 4, 8, 0, 30)  # a Wednesday
+    assert next_change([weekdays], wed_8) == (datetime(2026, 11, 4, 10, 0), False)
+    assert next_change([weekdays], datetime(2026, 11, 4, 10, 0)) == (datetime(2026, 11, 5, 7, 0), True)
+    sat_late = datetime(2026, 11, 7, 23, 30)
+    assert next_change([weekdays, night], sat_late) == (datetime(2026, 11, 8, 1, 0), False)
+    # One ending as another starts counts as a start.
+    back_to_back = [weekdays, sched(["wed"], "10:00", "11:00", 20)]
+    assert next_change(back_to_back, wed_8) == (datetime(2026, 11, 4, 10, 0), True)
+    assert next_change([], wed_8) is None
+
+
+
+def set_times(device):
+    return [p for _, p in device.writes if cbor.loads(p)["mT"] == 102]
+
+
+async def test_the_clock_is_set_only_when_it_is_off(monkeypatch, caplog):
+    """A background read checks the clock when it's due; it is set only if
+    more than 10 s off. The reading is logged and kept for diagnostics."""
+    caplog.set_level("DEBUG", logger=gm.__name__)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=3)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert len(device.clock_reads) == 1
+    assert set_times(device) == []
+    assert 2 <= matic.clock_offset <= 4 and matic.device_time is not None
+    assert "Clock of A4:C1:38:CB:03:37 reads" in caplog.text
+
+    await matic.disconnect()
+    device.clock_offset = -60
+    matic._clock_check_wanted = True  # due again (heard again, say)
+    await matic.connect()
+    assert len(device.clock_reads) == 2
+    assert len(set_times(device)) == 1
+
+
+async def test_the_clock_is_set_when_it_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(gm, "CLOCK_READ_TIMEOUT", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=None)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert len(set_times(device)) == 1
+
+    # A device that refuses the read isn't asked again.
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset="refuse")
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    await matic.disconnect()
+    matic._clock_check_wanted = True
+    await matic.connect()
+    assert len(device.clock_reads) == 1
+    assert len(set_times(device)) == 2
+
+
+async def test_a_never_set_clock_is_set_before_the_status_read(monkeypatch):
+    """Units that stay silent until their clock is set read 1970."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, needs_time=True)
+    matic = attach(monkeypatch, device)
+    assert await matic.connect()
+    assert len(set_times(device)) == 1
+
+
+
+async def test_a_schedule_save_keeps_the_link_open_between_steps(monkeypatch):
+    """The idle disconnect (5 s) is shorter than the pause between "remove
+    all" and the upload: the save holds the link until it has finished."""
+    monkeypatch.setattr(gm, "DISCONNECT_DELAY", 0.01)
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0.1)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    disconnects = []
+    original = matic._disconnect
+
+    async def counting():
+        disconnects.append(len(device.writes))
+        return await original()
+
+    monkeypatch.setattr(matic, "_disconnect", counting)
+    await matic.set_schedules([sched(["mon"], "07:00", "10:00", 20)])
+    kinds = [cbor.loads(p)["mT"] for _, p in device.writes]
+    assert kinds.index(108) < kinds.index(103)
+    assert not [n for n in disconnects if n <= kinds.index(103)]  # no drop mid-save
+    for _ in range(50):
+        if disconnects:
+            break
+        await asyncio.sleep(0.02)
+    assert disconnects  # and it closes once the save has finished
+
+
+
+def frame_with_mode(code):
+    """FRAME_308_IN with another mode code (cS)."""
+    frame = FRAME_308_IN.replace(bytes.fromhex("6263531872"), bytes.fromhex("62635318") + bytes([code]), 1)
+    assert frame != FRAME_308_IN or code == 0x72
+    return frame
+
+
+async def test_auto_is_judged_on_a_fresh_status(monkeypatch):
+    """The last status may be old (the device's button, another app): Auto
+    reads the status first, in the same queue step, and judges on that."""
+    device = FakeDevice(command_char=C4, status_frame=frame_with_mode(113))  # auto 20
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    await matic.connect()
+    assert matic.device_status.spray_interval == 20
+
+    # Switched off at the device since: the fresh read shows it, so 20 is sent.
+    device.status_frame = frame_with_mode(0)
+    assert await matic.choose_auto(20) is True
+    assert commands(device)[-1] == 104
+
+    # Already every 20 min: nothing re-sent (no extra spray).
+    await matic._refresh_task
+    device.status_frame = frame_with_mode(113)
+    sent = len(commands(device))
+    assert await matic.choose_auto(20) is False
+    assert len(commands(device)) == sent
+
+    # A schedule started meanwhile: refused.
+    device.status_frame = frame_with_mode(122)
+    with pytest.raises(gm.ScheduleRunning):
+        await matic.choose_auto(40)
+
+
+async def test_a_press_during_a_schedule_save_waits_for_it(monkeypatch):
+    """The save is one step in the command queue: a Spray now pressed
+    between "remove all" and the upload goes after the upload, rather than
+    widening the gap with no schedules."""
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    saving = asyncio.create_task(matic.set_schedules([sched(["mon"], "07:00", "10:00", 20)]))
+    for _ in range(200):
+        if 108 in commands(device):
+            break
+        await asyncio.sleep(0.001)
+    spraying = asyncio.create_task(matic.spray_now())
+    await asyncio.wait_for(saving, 2)
+    await asyncio.wait_for(spraying, 2)
+    kinds = [k for k in commands(device) if k in (108, 103, 104)]
+    assert kinds == [108, 103, 104]
+
+
+async def test_no_pause_after_opening_when_the_clock_was_left_alone(monkeypatch):
+    monkeypatch.setattr(gm, "SET_TIME_PACING", 5)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=1)
+    matic = attach(monkeypatch, device)
+    assert await asyncio.wait_for(matic.connect(), 1)  # no 5 s pause
+
+
+
+async def test_a_device_heard_again_is_read_again(monkeypatch):
+    """It may have changed while it was away (batteries out, its button)."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    matic.set_advertising(True)
+    await matic.connect()
+    assert not matic.needs_status_read()  # fresh
+
+    matic.set_advertising(False)
+    matic.set_advertising(True)
+    assert matic.needs_status_read()
+    await matic.disconnect()
+    assert await matic.connect_if_needed()
+    assert not matic.needs_status_read()
+
+
+# --- one operation at a time, and the link after each ----------------------
+
+def short_status_check(monkeypatch, matic, timeout=0.1):
+    monkeypatch.setattr(
+        matic, "get_device_status",
+        functools.partial(type(matic).get_device_status, matic, timeout=timeout),
+    )
+
+
+@pytest.mark.parametrize("echo_mn", [True, False])
+async def test_auto_ends_its_link_when_its_status_check_goes_unanswered(monkeypatch, echo_mn):
+    """Judged on the last status, nothing may be sent: the link must not
+    stay open with no disconnect to come. A device that copies message
+    numbers keeps it for the idle disconnect; one that doesn't has it
+    closed at once (a late reply could pass for a later one's)."""
+    device = FakeDevice(command_char=C4, status_frame=frame_with_mode(122), echo_mn=echo_mn)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    await matic.connect()
+    short_status_check(monkeypatch, matic)
+
+    def ended():
+        if echo_mn:
+            return matic._disconnect_task is not None and not matic._disconnect_task.done()
+        return matic.client is None
+
+    device.status_frame = b""  # stops answering
+    with pytest.raises(gm.ScheduleRunning):
+        await matic.choose_auto(20)
+    assert ended()
+
+    device.status_frame = frame_with_mode(113)  # auto 20
+    await matic.connect()
+    device.status_frame = b""
+    assert await matic.choose_auto(20) is False  # already at 20, nothing sent
+    assert ended()
+
+
+async def test_every_operation_ends_with_the_idle_disconnect(monkeypatch):
+    device = FakeDevice(command_char=C4, status_frame=frame_with_mode(113))
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    await matic.connect()
+    assert await matic.choose_auto(20) is False
+    assert matic._disconnect_task is not None and not matic._disconnect_task.done()
+
+
+async def test_an_unanswered_clock_read_is_asked_again_next_time(monkeypatch):
+    """Whether it keeps time was settled at setup: a missed answer in use
+    only means the time is set, and the next check reads it again."""
+    monkeypatch.setattr(gm, "CLOCK_READ_TIMEOUT", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=None)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    await matic.disconnect()
+    matic._clock_check_wanted = True
+    await matic.connect()
+    assert len(device.clock_reads) == 2
+    assert len(set_times(device)) == 2
+
+async def test_a_save_finishes_when_its_caller_is_cancelled(monkeypatch):
+    """Stopped between "remove all" and the upload, the device would be
+    left with no schedules."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    saving = asyncio.create_task(matic.set_schedules([sched(["mon"], "07:00", "10:00", 20)]))
+    for _ in range(200):
+        if 108 in commands(device):
+            break
+        await asyncio.sleep(0.001)
+    saving.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await saving
+    await asyncio.wait_for(asyncio.gather(*matic._save_tasks), 2)
+    assert 103 in commands(device)
+    assert len(device.stored_schedules) == 1
+
+
+async def test_unloading_lets_a_save_finish(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    saving = asyncio.create_task(matic.set_schedules([sched(["mon"], "07:00", "10:00", 20)]))
+    for _ in range(200):
+        if 108 in commands(device):
+            break
+        await asyncio.sleep(0.001)
+    await matic.shutdown()
+    assert await saving
+    assert len(device.stored_schedules) == 1
+
+
+async def test_a_new_watch_lets_a_read_in_progress_finish(monkeypatch):
+    """Cancelling it mid-read would cut the exchange short; it finishes
+    the read, then leaves the watching to the new one."""
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, reply_delay=0.1)
+    matic = attach(monkeypatch, device)
+    matic.watch_schedule_change(starting=True)
+    first = matic._start_watch
+    while not probes(device):
+        await asyncio.sleep(0.005)  # its read is waiting for the reply
+    matic.watch_schedule_change(starting=False)
+    second = matic._start_watch
+    await asyncio.wait_for(first, 1)
+    assert not first.cancelled()
+    assert first is not second
+    await matic.shutdown()
+
+
+async def test_a_request_gets_its_turn_within_the_connect_limit_or_fails(monkeypatch):
+    """Someone is waiting: a press behind a long exchange fails at the
+    connect limit, unsent, instead of going out late."""
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.1)
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    give_up = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        await give_up.wait()
+        raise TimeoutError
+
+    monkeypatch.setattr(gm, "establish_connection", hang)
+    poll = asyncio.ensure_future(matic.connect_if_needed())  # no time limit
+    await asyncio.sleep(0)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(gm.DeviceBusy, match="busy"):
+        await matic.spray_now()
+    assert loop.time() - began < 0.5
+    assert commands(device) == []
+    give_up.set()
+    with pytest.raises(DeviceConnectionError):
+        await poll
+
+
+async def test_a_background_read_may_wait_its_turn(monkeypatch):
+    monkeypatch.setattr(gm, "CONNECT_TIMEOUT", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    async with matic._operation():
+        reading = asyncio.ensure_future(matic.read_schedules_quietly())
+        await asyncio.sleep(0.2)  # past the limit
+        assert not reading.done()
+    assert await reading == []
+
+
+
+# --- the clock check at setup -------------------------------------------------
+
+async def test_setup_finds_a_device_that_keeps_time(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=-300)
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() == (C3, C1)
+    assert matic.detected_clock is True
+    assert device.time_set and len(device.clock_reads) == 1  # set, then read back
+
+
+async def test_setup_finds_no_clock_when_it_is_refused(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, set_time_ack=100)
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() == (C3, C1)
+    assert matic.detected_clock is False
+    assert device.clock_reads == []  # not asked once the set was refused
+
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset="refuse")
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() == (C3, C1)
+    assert matic.detected_clock is False
+
+
+async def test_setup_fails_when_the_clock_goes_unanswered(monkeypatch):
+    """Two tries of each step; no answer is a failed exchange, not a
+    missing clock."""
+    monkeypatch.setattr(gm, "CLOCK_CHECK_TIMEOUT", 0.05)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, clock_offset=None)
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() is None
+    assert len(device.clock_reads) == 2
+    assert matic.client is None
+
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN, set_time_ack=None)
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() is None
+    assert len(set_times(device)) == 2 and device.clock_reads == []
+
+
+async def test_a_device_without_a_clock_is_never_asked_about_time_or_schedules(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = gm.SmartMatic(hass=None, mac="A4:C1:38:CB:03:37", has_clock=False)
+    attach(monkeypatch, device)
+    await matic.connect()
+    assert device.clock_reads == [] and set_times(device) == []
+    assert await matic.read_schedules_quietly() is None
+    for call in (
+        matic.read_schedules(), matic.set_schedules([]), matic.stop_schedule(1),
+        matic.add_schedule(sched(["mon"], "07:00", "10:00", 20)), matic.remove_schedule(1),
+    ):
+        with pytest.raises(gm.NoClock):
+            await call
+    matic.watch_schedule_change(starting=True)
+    assert matic._start_watch is None
+    assert [k for k in commands(device) if k in (102, 103, 106, 108, 109)] == []
+
+
+async def test_setup_finds_no_clock_without_the_schedule_characteristic(monkeypatch):
+    """No writable 6e400004 means no schedules: the clock isn't checked."""
+    device = FakeDevice(command_char=C3, status_frame=FRAME_308_IN)
+    device.services = FakeServices([FakeService(MAIN_SVC, [
+        FakeChar(C1, 0x10, ["read", "notify"]),
+        FakeChar(C3, 0x17, ["read", "write-without-response", "notify"]),
+        FakeChar(C4, 0x1B, ["read", "notify"]),  # there, but not writable
+    ])])
+    matic = attach(monkeypatch, device)
+    assert await matic.detect_channels() == (C3, C1)
+    assert matic.detected_clock is False
+    assert set_times(device) == [] and device.clock_reads == []
+
+
+# --- message numbers ------------------------------------------------------------
+
+async def test_each_message_goes_out_with_a_number_of_its_own(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    await matic.spray_now()
+    await matic._refresh_task
+    await matic.read_schedules()
+    numbers = device.sent_mns
+    assert len(numbers) >= 4 and len(set(numbers)) == len(numbers)
+    assert all(100 <= n <= 253 and not 150 <= n <= 170 for n in numbers)
+    assert matic._waiters == {}
+
+
+async def test_numbers_wrap_round_and_skip_ones_still_awaited(monkeypatch):
+    matic = gm.SmartMatic(hass=None, mac="A4:C1:38:CB:03:37")
+    matic._mn_next = 253
+    loop = asyncio.get_running_loop()
+    matic._waiters[100] = gm._Waiter(154, "Spray command", loop.create_future())
+    assert [matic._next_mn() for _ in range(2)] == [253, 101]
+
+
+async def test_a_late_ack_does_not_confirm_a_later_command(monkeypatch):
+    """Spray and Auto share an ack type: only the number tells them apart."""
+    matic = gm.SmartMatic(hass=None, mac="A4:C1:38:CB:03:37")
+    loop = asyncio.get_running_loop()
+    waiter = gm._Waiter(154, "Spray command", loop.create_future())
+    matic._waiters[121] = waiter
+    matic._handle_message(gm.encode_message(mT=154, mN=120, ack=200))  # the earlier one's
+    assert not waiter.future.done()
+    matic._handle_message(gm.encode_message(mT=154, mN=121, ack=200))
+    assert waiter.future.result().acknowledgement == 200
+
+
+async def test_a_refusal_is_matched_by_its_number_not_its_type(monkeypatch, caplog):
+    """A refusal's mT is the previous reply's (164 after a clock read)."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    caplog.set_level("WARNING", logger=gm.__name__)
+    on_write = device.on_write
+
+    def refuse_sprays(uuid, payload):
+        message = cbor.loads(bytes(payload))
+        if message["mT"] == 104:
+            device._notify(device.reply_char, gm.encode_message(mT=164, mN=message["mN"], ack=100))
+            return
+        on_write(uuid, payload)
+
+    device.on_write = refuse_sprays
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(CommandNotConfirmed):
+        await matic.spray_now()
+    assert loop.time() - began < 0.15  # at once, not after the ack timeout
+    assert any("Spray command refused" in r.message and "code 100" in r.message
+               for r in caplog.records)
+    matic._refresh_task.cancel()
+
+
+async def test_a_device_that_does_not_copy_numbers_still_works(monkeypatch, caplog):
+    """Replies carry their reply type instead: matched by type from then on,
+    with one warning."""
+    device = FakeDevice(command_char=C4, status_frame=FRAME_308_IN, echo_mn=False)
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    caplog.set_level("WARNING", logger=gm.__name__)
+    assert await matic.connect()
+    await matic.spray_now()
+    await matic._refresh_task
+    assert matic._echoes_mn is False
+    warnings = [r for r in caplog.records if "doesn't copy message numbers" in r.message]
+    assert len(warnings) == 1
+    assert matic.device_status.battery_mv == 3170
+
+
+
+# --- when the clock is checked ---------------------------------------------------
+
+async def test_actions_never_check_the_clock_first(monkeypatch):
+    """Someone is waiting: each message costs the device up to ~1.5 s."""
+    device = FakeDevice(command_char=C4, status_frame=frame_with_mode(0))  # idle
+    matic = attach(monkeypatch, device, command_char=C4, reply_char=C1)
+    assert matic._clock_due  # not checked since start
+    await matic.spray_now()
+    await matic._refresh_task
+    await matic.disconnect()
+    await matic.identify()
+    await matic._refresh_task
+    await matic.disconnect()
+    assert await matic.choose_auto(20)
+    await matic._refresh_task
+    await matic.disconnect()
+    assert await matic.connect(purpose="update status")
+    assert device.clock_reads == []
+
+
+async def test_a_recent_status_still_gets_its_hourly_clock_check(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    await matic.connect(purpose="update status")  # fresh status, no clock check
+    await matic.disconnect()
+    assert matic.needs_status_read()  # for the clock
+    reads = len(probes(device))
+    assert await matic.connect_if_needed()
+    assert len(device.clock_reads) == 1
+    assert len(probes(device)) == reads  # the status wasn't read again
+    assert not matic.needs_status_read()
+
+    monkeypatch.setattr(matic, "_clock_checked_at", gm.time.monotonic() - gm.CLOCK_CHECK_INTERVAL)
+    assert matic.needs_status_read()  # an hour on
+
+
+async def test_the_clock_check_gives_way_to_a_waiting_action(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    await matic.connect(purpose="update status")
+    async with matic._operation():
+        checking = asyncio.ensure_future(matic.check_clock())
+        await asyncio.sleep(0)
+        press = asyncio.ensure_future(matic.spray_now())
+        await asyncio.sleep(0)
+    await checking
+    await press
+    assert device.clock_reads == []  # left for the next chance
+    assert matic._clock_due
+    matic._refresh_task.cancel()
+
+
+async def test_the_clock_is_checked_when_the_device_is_heard_again(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    matic.set_advertising(True)
+    await matic.connect()
+    assert len(device.clock_reads) == 1 and not matic._clock_due
+    matic.set_advertising(False)  # batteries out, say
+    matic.set_advertising(True)
+    assert matic._clock_due
+    await matic.disconnect()
+    assert await matic.connect_if_needed()
+    assert len(device.clock_reads) == 2
+
+
+async def test_schedule_starts_ends_and_saves_check_the_clock(monkeypatch):
+    monkeypatch.setattr(gm, "SCHEDULE_PAUSE", 0)
+    device = FakeDevice(command_char=ALL, status_frame=FRAME_308_IN)
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert len(device.clock_reads) == 1  # not due again for an hour
+
+    await matic.set_schedules([sched(["mon"], "07:00", "10:00", 20)])
+    assert len(device.clock_reads) == 2
+    if matic._refresh_task:
+        await matic._refresh_task
+
+    matic.watch_schedule_change(starting=True)
+    watch = matic._start_watch
+    while len(device.clock_reads) < 3 and not watch.done():
+        await asyncio.sleep(0.005)
+    assert len(device.clock_reads) == 3  # its first read
+    await matic.shutdown()
+
+
+def frame_with_battery(mv):
+    """FRAME_308_IN with another battery voltage (bV)."""
+    at = FRAME_308_IN.index(b"bbV\x1a") + 4
+    return FRAME_308_IN[:at] + mv.to_bytes(4, "big") + FRAME_308_IN[at + 4:]
+
+
+async def test_new_batteries_get_a_clock_check_straight_away(monkeypatch, caplog):
+    """A quick swap may not make the device go unheard; its clock restarts."""
+    caplog.set_level("INFO", logger=gm.__name__)
+    device = FakeDevice(command_char=ALL, status_frame=frame_with_battery(2650))  # about 68 %
+    matic = attach(monkeypatch, device)
+    await matic.connect()
+    assert len(device.clock_reads) == 1 and not matic._clock_due
+
+    device.status_frame = frame_with_battery(3120)  # 100 %
+    await matic.connect(purpose="update status")  # an action: no clock check of its own
+    await asyncio.wait_for(matic._clock_task, 2)
+    assert len(device.clock_reads) == 2
+    assert "seems to have new batteries" in caplog.text
+
+    # An ordinary small rise isn't new batteries.
+    device.status_frame = frame_with_battery(3000)
+    await matic.connect(purpose="update status")
+    device.status_frame = frame_with_battery(3050)
+    await matic.connect(purpose="update status")
+    assert matic._clock_task.done() and len(device.clock_reads) == 2
+
+
+
+async def test_new_batteries_are_seen_against_the_level_kept_over_a_restart(monkeypatch):
+    device = FakeDevice(command_char=ALL, status_frame=frame_with_battery(3120))
+    matic = attach(monkeypatch, device)
+    matic.restored_battery_percent = 60
+    await matic.connect(purpose="update status")
+    assert matic.batteries_replaced_at is not None
+    await asyncio.wait_for(matic._clock_task, 2)
+    assert len(device.clock_reads) == 1

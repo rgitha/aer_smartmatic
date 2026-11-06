@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import time
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from .const import SPRAY_INTERVALS
@@ -186,3 +186,32 @@ def _days_text(days: tuple[str, ...]) -> str:
     if len(days) == 7:
         return "Daily"
     return ", ".join(_DAY_LABELS[d] for d in days)
+
+
+def next_change(
+    schedules: list[Schedule], now: datetime
+) -> tuple[datetime, bool] | None:
+    """When the next schedule starts or ends after ``now``, and whether it
+    starts (True) or ends. A window that runs past midnight ends the next
+    day; if one schedule ends as another starts, that counts as a start.
+    """
+    changes: dict[int, bool] = {}
+    for schedule in schedules:
+        for day in schedule.days:
+            start = (DAYS.index(day) * _MINUTES_PER_DAY + schedule.start_minutes) % _MINUTES_PER_WEEK
+            end = (start + schedule.sprays * schedule.interval) % _MINUTES_PER_WEEK
+            changes[start] = True
+            changes.setdefault(end, False)
+    if not changes:
+        return None
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    elapsed = (now - week_start).total_seconds() / 60
+    best: tuple[float, bool] | None = None
+    for minute, starting in changes.items():
+        ahead = (minute - elapsed) % _MINUTES_PER_WEEK or _MINUTES_PER_WEEK
+        if best is None or ahead < best[0]:
+            best = (ahead, starting)
+    assert best is not None
+    return now + timedelta(minutes=best[0]), best[1]

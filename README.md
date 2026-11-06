@@ -54,6 +54,10 @@ To edit them from a dashboard, use the
 - **Connection status:** OK, or Unreachable when the device isn't heard or the
   last exchange failed.
 - **Updated last:** when the status was last read.
+- **Batteries replaced:** when new batteries were last seen, meaning the battery
+  level rose by more than 10 points to 90 % or more between two status reads.
+  Unknown until then. Their clock is checked at once, since new batteries
+  restart it.
 - **Signal strength:** with the adapter or proxy that received it.
 - **Channel: command**, **Channel: reply** and **Connection link:** for
   debugging, disabled by default.
@@ -105,23 +109,60 @@ The device keeps its auto-spray setting and schedules, and runs on its own.
 ## Data updates
 
 The device doesn't push changes, so the integration reads its status:
-- once an hour while the device is heard;
+- once an hour, at one of its advertisements while it is heard;
 - after every command;
-- when you press **Update status** or call the action.
+- about 30, 60 and 90 seconds after each schedule starts or ends (including
+  a window that runs past midnight), until the status shows the change; and
+  likewise after saving a schedule that covers the current time;
+- when you press **Update status**, call the action, or call
+  `homeassistant.update_entity` on any of its entities.
 
 The schedules are read once after startup, after every schedule change and
 with Update status. If a schedule read goes unanswered, they're read again
 after the next successful status read.
 
-To save battery, it disconnects after each exchange, so the link opening and
-closing is normal. After a failed read, command or Update status, it reads
-again within a minute; if that fails too, it retries after 30 s, 1, 2 and 5
-minutes, then every 5 minutes until the device answers.
+Setup checks that the device keeps schedules: that it has a writable schedule
+characteristic, and that it takes the time when its clock is set and read
+back. A device without the characteristic, or that refuses either, has no
+clock and so no schedules: it gets no Schedules sensor, and the schedule
+actions are refused. One that doesn't answer fails setup, like any other
+unanswered exchange. The Status sensor's **has_clock** attribute shows the
+result, for automations.
+
+The device runs its schedules on its own clock. The integration reads that
+clock, and sets it from Home Assistant's time only if it is more than 10
+seconds off (or can't be read):
+
+- in the background, at most once an hour (just the clock, when the status is
+  recent);
+- after Home Assistant starts;
+- when the device is heard again after being away (its batteries may have
+  been out), or its battery level jumps to 90 % or more (new batteries);
+- at each schedule start and end;
+- before a schedule save.
+
+It never checks the clock ahead of a press, Identify or Auto, because each
+message to an idle device can take a second or more. A background check gives
+way to a press that's waiting. The reading is in the debug log and the
+diagnostics download.
+
+Exchanges with the device run one at a time, each whole: a press made during
+a status read, a schedule save or Identify goes once that has finished. To save
+battery, it disconnects 5 seconds after the last exchange, so the link opening
+and closing is normal. Each message carries a number of its own, which the
+device copies into its reply, so a reply that comes late can't be taken for
+the answer to a later message; it is ignored. (Should a device not copy the
+numbers, the integration notes it in the log and disconnects straight away
+after any unanswered message instead.) After a failed read, command or Update status, it reads
+again at the device's next advertisement; if that fails too, it waits 30 s,
+1, 2 and 5 minutes, then 5 minutes each time, until the device answers.
 
 When Home Assistant hasn't heard the device's advertisements for a few minutes
 (typically 3 to 8), Connection status turns Unreachable, Status shows
 Disconnected, and the readings and controls become unavailable. They return
 as soon as the device is heard again.
+Its status is read again as soon as it is heard, since it may have changed
+while it was away.
 
 ## Actions
 
@@ -129,6 +170,8 @@ as soon as the device is heard again.
 
 Reads the status and schedules now, ignoring the retry wait. Target one or
 more devices or entities, or leave the target out to update every device.
+Unlike `homeassistant.update_entity`, which does the same read, it reports
+a failure ("Couldn't reach …").
 
 ```yaml
 action: godrej_aer.update_status

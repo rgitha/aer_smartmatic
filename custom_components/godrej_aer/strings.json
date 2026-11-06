@@ -38,6 +38,7 @@
     "progress": {
       "connecting": "Connecting to the device…",
       "checking_defaults": "Checking that the device responds…",
+      "checking_clock": "Checking the device's clock…",
       "probing": "Trying connection option {index} of {total}…",
       "probing_again": "Setting the clock and trying connection option {index} of {total} again…"
     }
@@ -133,6 +134,15 @@
           "auto": "Auto",
           "schedule": "Schedule",
           "disconnected": "Disconnected"
+        },
+        "state_attributes": {
+          "has_clock": {
+            "name": "Has clock",
+            "state": {
+              "true": "Yes",
+              "false": "No"
+            }
+          }
         }
       },
       "battery_level": {
@@ -158,6 +168,9 @@
       },
       "updated_last": {
         "name": "Updated last"
+      },
+      "batteries_replaced": {
+        "name": "Batteries replaced"
       }
     },
     "button": {
@@ -195,6 +208,12 @@
     },
     "schedules_changed": {
       "message": "The schedules on the device changed since they were read. Read them again before saving."
+    },
+    "device_busy": {
+      "message": "The device is busy with another command. Try again."
+    },
+    "no_clock": {
+      "message": "This air freshener has no clock, so it can't keep schedules."
     },
     "auto_during_schedule": {
       "message": "A schedule is running. Skip it to stop it."
