@@ -1,0 +1,19 @@
+name: Sync upstream branch
+# Moves the "upstream" branch to the original repository's master, keeping
+# its commit IDs (fast-forward only; it fails rather than overwrite). Run it
+# from the Actions tab with "Run workflow".
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Move "upstream" to the original repository's master
+        run: |
+          git fetch https://github.com/ov1d1u/godrej_aer.git master
+          git push origin FETCH_HEAD:refs/heads/upstream
