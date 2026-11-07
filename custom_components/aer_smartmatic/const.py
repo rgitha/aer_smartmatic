@@ -1,6 +1,6 @@
-"""Constants for the Godrej Aer Smart Matic integration."""
+"""Constants for the Aer Smart Matic integration."""
 
-DOMAIN = "godrej_aer"
+DOMAIN = "aer_smartmatic"
 
 CONNECTION_TIMEOUT = 120
 

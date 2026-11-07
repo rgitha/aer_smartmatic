@@ -1,4 +1,4 @@
-"""Services for the Godrej Aer Smart Matic integration."""
+"""Services for the Aer Smart Matic integration."""
 from __future__ import annotations
 
 import asyncio
@@ -96,7 +96,7 @@ async def _async_matched_instances(
     """Return the SmartMatic instances targeted by a service call.
 
     Resolves the call's area/device/entity target to loaded config entries.
-    With no target, every loaded Godrej Aer entry is used.
+    With no target, every loaded Aer Smart Matic entry is used.
     """
     entry_ids = await _extract_config_entry_ids(hass, call)
 

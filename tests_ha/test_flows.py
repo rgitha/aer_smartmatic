@@ -8,8 +8,8 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.godrej_aer.const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR, DOMAIN
-from custom_components.godrej_aer.godrej.exception import (
+from custom_components.aer_smartmatic.const import CONF_COMMAND_CHAR, CONF_REPLY_CHAR, DOMAIN
+from custom_components.aer_smartmatic.godrej.exception import (
     ConnectionError as DeviceConnectionError,
     InvalidDeviceError,
 )
@@ -18,7 +18,7 @@ MAC = "A4:C1:38:CB:03:37"
 C1 = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 C3 = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 C4 = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
-CF = "custom_components.godrej_aer.config_flow"
+CF = "custom_components.aer_smartmatic.config_flow"
 DETECT = f"{CF}.SmartMatic.detect_channels"
 UNAVAILABLE = []
 
@@ -26,8 +26,8 @@ UNAVAILABLE = []
 def deliver_status(instance, frame):
     """A status reply arriving for a read in progress (the device copies
     the read's number into it); one nobody asked for is ignored."""
-    from custom_components.godrej_aer.godrej import cbor
-    from custom_components.godrej_aer.godrej.godrej import _Waiter
+    from custom_components.aer_smartmatic.godrej import cbor
+    from custom_components.aer_smartmatic.godrej.godrej import _Waiter
 
     mn = cbor.loads(frame)["mN"]
     instance._waiters[mn] = _Waiter(157, "Status request", asyncio.get_running_loop().create_future())
@@ -60,7 +60,7 @@ async def start_flow(hass):
 
 def no_setup():
     """Creating the entry would set it up; not needed in flow tests."""
-    return patch("custom_components.godrej_aer.async_setup_entry", AsyncMock(return_value=True))
+    return patch("custom_components.aer_smartmatic.async_setup_entry", AsyncMock(return_value=True))
 
 
 async def pick_device(hass, result, detect):
@@ -243,7 +243,7 @@ async def test_reconfigure_form_is_plain(hass):
 
 async def test_reconfigure_uses_the_loaded_instance(hass):
     """The device takes a single connection, so probe through the running one."""
-    from custom_components.godrej_aer.godrej.godrej import SmartMatic
+    from custom_components.aer_smartmatic.godrej.godrej import SmartMatic
 
     entry = make_entry(hass)
     running = SmartMatic(hass, MAC, command_char=C4, reply_char=C1)
@@ -289,7 +289,7 @@ ADVERTS: list = []  # the coordinator's advertisement callback, per setup
 
 
 async def setup_entry(hass, entry, service_info=None, connect=None):
-    from custom_components.godrej_aer.godrej.godrej import SmartMatic
+    from custom_components.aer_smartmatic.godrej.godrej import SmartMatic
 
     patches = [
         patch("homeassistant.components.bluetooth.async_register_callback", return_value=lambda: None),
@@ -379,7 +379,7 @@ async def expect_unconfirmed(hass, domain, service, entity_id, key="command_not_
     ("button.hall_reset_refill_level", "reset_refill"),
 ])
 async def test_unconfirmed_button_press_shows_an_error(hass, entity_id, method):
-    from custom_components.godrej_aer.godrej.exception import CommandNotConfirmed
+    from custom_components.aer_smartmatic.godrej.exception import CommandNotConfirmed
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -393,7 +393,7 @@ async def test_unconfirmed_button_press_shows_an_error(hass, entity_id, method):
 
 
 async def test_auto_spray_mode_follows_the_acknowledgement(hass):
-    from custom_components.godrej_aer.godrej.exception import CommandNotConfirmed
+    from custom_components.aer_smartmatic.godrej.exception import CommandNotConfirmed
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -453,7 +453,7 @@ async def test_auto_spray_mode_shows_the_device_state(hass):
 
 
 async def test_identify(hass):
-    from custom_components.godrej_aer.godrej.exception import NotIdle
+    from custom_components.aer_smartmatic.godrej.exception import NotIdle
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -481,7 +481,7 @@ async def test_old_auto_spray_entities_are_removed(hass):
 
 
 async def test_signal_strength_updates_are_throttled(hass):
-    from custom_components.godrej_aer.sensor import SmartMaticSignalStrengthSensor
+    from custom_components.aer_smartmatic.sensor import SmartMaticSignalStrengthSensor
 
     entry = make_entry(hass)
     await setup_entry(hass, entry, SimpleNamespace(rssi=-61, source="proxy"))
@@ -654,7 +654,7 @@ async def test_battery_is_shown_as_a_percentage(hass):
 
 
 async def test_flat_batteries_show_a_toast_but_keep_the_new_state(hass):
-    from custom_components.godrej_aer.godrej.exception import BatteryTooLow
+    from custom_components.aer_smartmatic.godrej.exception import BatteryTooLow
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -694,7 +694,7 @@ async def test_reads_follow_the_advertisements(hass):
     from homeassistant.components.bluetooth import BluetoothChange
     from homeassistant.util import dt as dt_util
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
-    from custom_components.godrej_aer.godrej.godrej import SmartMatic
+    from custom_components.aer_smartmatic.godrej.godrej import SmartMatic
 
     entry = make_entry(hass)
     connect = AsyncMock(return_value=True)
@@ -720,7 +720,7 @@ async def test_reads_follow_the_advertisements(hass):
 
 def _sched(days, start, end, interval):
     from datetime import time as dtime
-    from custom_components.godrej_aer.godrej.schedule import Schedule
+    from custom_components.aer_smartmatic.godrej.schedule import Schedule
 
     h1, m1 = map(int, start.split(":"))
     h2, m2 = map(int, end.split(":"))
@@ -728,7 +728,7 @@ def _sched(days, start, end, interval):
 
 
 async def test_schedules_sensor_lists_what_the_device_holds(hass):
-    from custom_components.godrej_aer.godrej.events import DEVICE_SCHEDULES_UPDATE
+    from custom_components.aer_smartmatic.godrej.events import DEVICE_SCHEDULES_UPDATE
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -751,7 +751,7 @@ async def test_schedules_sensor_lists_what_the_device_holds(hass):
 
 
 async def test_schedules_are_read_once_after_the_first_status(hass):
-    from custom_components.godrej_aer.godrej.godrej import SmartMatic
+    from custom_components.aer_smartmatic.godrej.godrej import SmartMatic
     from test_devicestatus_frame import FRAME
 
     entry = make_entry(hass)
@@ -806,7 +806,7 @@ async def test_schedule_actions(hass):
 
 async def test_schedule_action_reports_device_failures(hass):
     from homeassistant.exceptions import HomeAssistantError
-    from custom_components.godrej_aer.godrej.exception import CommandNotConfirmed
+    from custom_components.aer_smartmatic.godrej.exception import CommandNotConfirmed
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -922,7 +922,7 @@ async def test_status_combines_mode_and_reachability(hass):
 
 
 async def test_set_schedules_refuses_when_the_device_list_changed(hass):
-    from custom_components.godrej_aer.godrej.exception import SchedulesChanged
+    from custom_components.aer_smartmatic.godrej.exception import SchedulesChanged
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -941,8 +941,8 @@ async def test_set_schedules_refuses_when_the_device_list_changed(hass):
 
 
 async def test_auto_mode_is_refused_during_a_schedule_run(hass):
-    from custom_components.godrej_aer.godrej.devicestatus import DeviceStatus
-    from custom_components.godrej_aer.godrej.godrej import encode_message
+    from custom_components.aer_smartmatic.godrej.devicestatus import DeviceStatus
+    from custom_components.aer_smartmatic.godrej.godrej import encode_message
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -975,7 +975,7 @@ async def test_schedules_are_restored_after_a_restart(hass):
 
 
 async def test_diagnostics_report(hass):
-    from custom_components.godrej_aer.diagnostics import async_get_config_entry_diagnostics
+    from custom_components.aer_smartmatic.diagnostics import async_get_config_entry_diagnostics
     from test_devicestatus_frame import FRAME
 
     entry = make_entry(hass)
@@ -998,7 +998,7 @@ async def test_diagnostics_report(hass):
     }
     assert report["clock"]["has_clock"] is True
 
-    from custom_components.godrej_aer.godrej.schedule import Schedule
+    from custom_components.aer_smartmatic.godrej.schedule import Schedule
     from datetime import time
     instance = entry.runtime_data.instance
     instance.schedules = [Schedule.create(["mon"], time(8), time(10), 20)]
@@ -1012,7 +1012,7 @@ async def test_diagnostics_report(hass):
 async def test_deleting_a_device_offers_it_again(hass):
     entry = make_entry(hass)
     await setup_entry(hass, entry)
-    with patch("custom_components.godrej_aer.bluetooth.async_rediscover_address") as again:
+    with patch("custom_components.aer_smartmatic.bluetooth.async_rediscover_address") as again:
         await hass.config_entries.async_remove(entry.entry_id)
         await hass.async_block_till_done()
     again.assert_called_once_with(hass, MAC)
@@ -1190,7 +1190,7 @@ async def test_status_is_read_around_each_schedule_start_and_end(hass, freezer):
     from datetime import timedelta
     from homeassistant.util import dt as dt_util
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
-    from custom_components.godrej_aer.godrej.events import DEVICE_SCHEDULES_UPDATE
+    from custom_components.aer_smartmatic.godrej.events import DEVICE_SCHEDULES_UPDATE
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)
@@ -1249,7 +1249,7 @@ async def test_status_shows_whether_the_device_keeps_time(hass):
 async def test_a_press_that_waits_too_long_says_the_device_is_busy(hass):
     """It didn't get its turn within 5 s: not an unreachable device."""
     from homeassistant.exceptions import HomeAssistantError
-    from custom_components.godrej_aer.godrej.exception import DeviceBusy
+    from custom_components.aer_smartmatic.godrej.exception import DeviceBusy
 
     entry = make_entry(hass)
     await setup_entry(hass, entry)

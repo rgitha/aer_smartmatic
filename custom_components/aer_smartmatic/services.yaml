@@ -1,21 +1,21 @@
 update_status:
   name: Update status
   description: >-
-    Connect to the Godrej Aer Smart Matic device and refresh its status
+    Connect to the Aer Smart Matic device and refresh its status
     and its schedules. Bypasses the automatic retry
     cooldown. If no target is given, every configured device is updated.
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
 
 set_schedules:
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
   fields:
     schedules:
       required: true
@@ -32,9 +32,9 @@ set_schedules:
 add_schedule:
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
   fields:
     days:
       required: true
@@ -83,9 +83,9 @@ add_schedule:
 remove_schedule:
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
   fields:
     number:
       required: true
@@ -99,16 +99,16 @@ remove_schedule:
 clear_schedules:
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
 
 stop_schedule:
   target:
     device:
-      integration: godrej_aer
+      integration: aer_smartmatic
     entity:
-      integration: godrej_aer
+      integration: aer_smartmatic
   fields:
     schedule:
       required: true

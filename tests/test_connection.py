@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 def load_driver():
     package = ModuleType("smartmatic_test_driver")
     package.__path__ = [str(Path(__file__).resolve().parents[1] /
-                            "custom_components/godrej_aer/godrej")]
+                            "custom_components/aer_smartmatic/godrej")]
     stubs = {"smartmatic_test_driver": package}
     for name in ("bleak", "bleak_retry_connector", "homeassistant",
                  "homeassistant.components", "homeassistant.components.bluetooth",

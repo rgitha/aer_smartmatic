@@ -1,4 +1,4 @@
-"""The Godrej Aer Smart Matic integration."""
+"""The Aer Smart Matic integration."""
 from __future__ import annotations
 import logging
 
@@ -39,7 +39,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry
 ) -> bool:
-    """Set up Godrej Aer Smart Matic from a config entry."""
+    """Set up Aer Smart Matic from a config entry."""
 
     mac = entry.options.get(CONF_MAC, None) or entry.data.get(CONF_MAC, None)
 
@@ -66,7 +66,7 @@ async def async_setup_entry(
         instance.eventbus.remove_listener(DEVICE_STATUS_UPDATE, _on_first_status)
         if instance.schedules is None and instance.has_clock:
             entry.async_create_background_task(
-                hass, _read_schedules(), f"godrej_aer schedules {mac}"
+                hass, _read_schedules(), f"aer_smartmatic schedules {mac}"
             )
 
     instance.eventbus.add_listener(DEVICE_STATUS_UPDATE, _on_first_status)

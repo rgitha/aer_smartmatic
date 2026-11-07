@@ -41,4 +41,4 @@ sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
 
 # Import the device library as a top-level package so the integration's
 # __init__ (which needs the real Home Assistant) is not loaded.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "custom_components" / "godrej_aer"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "custom_components" / "aer_smartmatic"))

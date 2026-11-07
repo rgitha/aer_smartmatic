@@ -1,4 +1,4 @@
-"""Device- and BLE-connection constants for the Godrej Aer Smart Matic."""
+"""Device- and BLE-connection constants for the Aer Smart Matic."""
 
 # Nordic UART-style GATT service and characteristics exposed by the device.
 MAIN_SVC = "6e400000-b5a3-f393-e0a9-e50e24dcca9e"

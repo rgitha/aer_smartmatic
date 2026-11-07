@@ -1,4 +1,4 @@
-"""Config flow for Godrej Aer Smart Matic integration."""
+"""Config flow for Aer Smart Matic integration."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ DEFAULT_NAME = "Smart Matic"
 _MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
 
 
-class GodrejAerConfigFlow(ConfigFlow, domain=DOMAIN):
+class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
