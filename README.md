@@ -48,7 +48,7 @@ separately**, from its own repository.
 
 1. In HACS, open the menu and choose **Custom repositories**.
 2. Add `https://github.com/rgitha/aer_smartmatic` as an **Integration**.
-3. Install **Aer Smart Matic** and restart Home Assistant.
+3. Install **Godrej Aer Smart Matic** and restart Home Assistant.
 
 ### Manual
 
@@ -60,7 +60,7 @@ folder and restart Home Assistant.
 Home Assistant discovers devices within range and offers them under
 **Settings → Devices & services**; choose **Add** and confirm.
 
-Or, to add one yourself, choose **Add integration → Aer Smart Matic**. Select a discovered
+Or, to add one yourself, choose **Add integration → Godrej Aer Smart Matic**. Select a discovered
 device or enter the device's Bluetooth MAC address manually, e.g. `AA:BB:CC:DD:EE:FF`.
 
 Home Assistant then checks that the device responds and adds it as "Smart
@@ -216,7 +216,7 @@ soon as the device is heard again.
 
 ## Removal
 
-1. Go to **Settings → Devices & services → Aer Smart Matic**.
+1. Go to **Settings → Devices & services → Godrej Aer Smart Matic**.
 2. Open the device entry's ⋮ menu and choose **Delete**.
 3. To remove the integration completely, uninstall it in HACS (or delete
    `custom_components/aer_smartmatic`) and restart Home Assistant.

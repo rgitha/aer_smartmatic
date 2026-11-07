@@ -12,6 +12,7 @@ from custom_components.aer_smartmatic.const import CONF_COMMAND_CHAR, CONF_REPLY
 from custom_components.aer_smartmatic.godrej.exception import (
     ConnectionError as DeviceConnectionError,
     InvalidDeviceError,
+    NotIdle,
 )
 
 MAC = "A4:C1:38:CB:03:37"
@@ -1071,24 +1072,91 @@ async def test_bluetooth_discovery_sets_up_after_confirming(hass):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
     )
-    assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
-    # Every placeholder the step's title and text use must be given.
-    assert result["description_placeholders"] == {"name": "Smart Matic", "address": MAC}
+    assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
+    assert result["menu_options"] == ["flash", "setup"]
+    # Every placeholder the step's title and text use must be given; the
+    # name carries the end of the address, to tell devices apart.
+    assert result["description_placeholders"] == {
+        "name": "Smart Matic (03-37)", "address": MAC, "note": "",
+    }
     flow = hass.config_entries.flow.async_get(result["flow_id"])
-    assert flow["context"]["title_placeholders"] == {"name": "Smart Matic"}
+    assert flow["context"]["title_placeholders"] == {"name": "Smart Matic (03-37)"}
 
     detect = AsyncMock(side_effect=[None, (C4, C1)])
     with patch(DETECT, detect), no_setup(), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "setup"})
         result, _ = await finish_progress(hass, result)
-        # No reply: back to the confirmation, to try again.
-        assert result["step_id"] == "bluetooth_confirm"
-        assert result["errors"] == {"base": "no_reply"}
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        # No reply: back to the Setup confirm form, saying why, to try again.
+        assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
+        assert "didn't respond" in result["description_placeholders"]["note"]
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "setup"})
         result, _ = await finish_progress(hass, result)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Smart Matic"
     assert result["result"].unique_id == MAC.lower()
+
+
+IDENTIFY = f"{CF}.SmartMatic.identify"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "note"),
+    [
+        (None, ""),
+        (NotIdle("busy"), "can't flash while auto-spray or a schedule is running"),
+        (DeviceConnectionError("gone"), "didn't respond"),
+    ],
+)
+async def test_setup_confirm_flashes_the_lights(hass, outcome, note):
+    """Flash its lights, then back to the same Setup confirm form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
+    )
+    identify = AsyncMock(side_effect=outcome)
+    disconnect = AsyncMock()
+    with patch(IDENTIFY, identify), patch(f"{CF}.SmartMatic.disconnect", disconnect):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "flash"})
+        result, _ = await finish_progress(hass, result)
+    identify.assert_awaited_once()
+    disconnect.assert_awaited_once()
+    assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
+    assert note in result["description_placeholders"]["note"]
+    if not note:
+        assert result["description_placeholders"]["note"] == ""
+    # Nothing is added until Set it up.
+    assert not hass.config_entries.async_entries(DOMAIN)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "errors"),
+    [(None, None), (NotIdle("busy"), {"base": "flash_not_idle"}), (TimeoutError(), {"base": "flash_no_reply"})],
+)
+async def test_select_device_form_flashes_the_lights(hass, outcome, errors):
+    """With the tick box, Submit flashes the chosen device and brings the
+    form back with the same device and the box still ticked."""
+    result = await start_flow(hass)
+    identify = AsyncMock(side_effect=outcome)
+    detect = AsyncMock(return_value=(C4, C1))
+    with patch(IDENTIFY, identify), patch(DETECT, detect), no_setup(), \
+         patch(f"{CF}.SmartMatic.disconnect", AsyncMock()), \
+         patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"mac": MAC, "flash": True}
+        )
+        result, _ = await finish_progress(hass, result)
+        identify.assert_awaited_once()
+        detect.assert_not_awaited()
+        assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
+        assert (result["errors"] or {}) == (errors or {})
+        defaults = {str(k): k.default() for k in result["data_schema"].schema}
+        assert defaults == {"mac": MAC, "flash": True}
+        # Unticked, Submit sets it up.
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"mac": MAC, "flash": False}
+        )
+        result, _ = await finish_progress(hass, result)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Smart Matic"
 
 
 async def test_bluetooth_discovery_of_a_configured_or_other_device_aborts(hass):

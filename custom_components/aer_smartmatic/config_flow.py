@@ -21,7 +21,7 @@ from homeassistant.components.bluetooth import (
 
 from .const import CONF_COMMAND_CHAR, CONF_HAS_CLOCK, CONF_REPLY_CHAR, DOMAIN
 from .godrej import SmartMatic
-from .godrej.exception import InvalidDeviceError, ConnectionError
+from .godrej.exception import InvalidDeviceError, ConnectionError, NotIdle
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +29,30 @@ MANUAL_MAC = "manual_mac"
 # The name devices advertise; the default device name.
 DEFAULT_NAME = "Smart Matic"
 _MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
+# The Select device form's tick box: flash the chosen device's lights only.
+CONF_FLASH = "flash"
+# Shown on the Setup confirm form when its lights couldn't flash.
+_FLASH_NOTES = {
+    "flash_not_idle": "Its lights can't flash while auto-spray or a schedule is running.",
+    "flash_no_reply": "The device didn't respond.",
+}
+# A menu can't show errors: the Setup confirm form shows a failed setup's
+# reason as a note instead (the "error" texts in strings.json).
+_ERROR_NOTES = {
+    "cannot_connect": "Failed to connect.",
+    "invalid_device": "This is not a supported Smart Matic device.",
+    "no_reply": (
+        "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, "
+        "disconnect any phone connected to it, and try again."
+    ),
+    "unknown": "Unexpected error.",
+}
+
+
+def _label(name: str, mac: str) -> str:
+    """The name with the end of the address, to tell devices apart:
+    "Smart Matic (78-61)"."""
+    return f"{name} ({mac[-5:].replace(':', '-').upper()})"
 
 
 class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -50,6 +74,9 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         self._stage: tuple[str, dict[str, str]] = ("connecting", {})
         self._stage_changed = asyncio.Event()
         self._waiter: asyncio.Task[None] | None = None
+        self._flash_task: asyncio.Task[str | None] | None = None
+        self._flash_ticked = False
+        self._note = ""
 
     def _is_device_supported(self, device_info: BluetoothServiceInfoBleak) -> bool:
         name = device_info.name or ""
@@ -86,6 +113,9 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
             self._manual_entry = False
             self.mac = user_input[CONF_MAC]
             self.name = self._listed_names.get(self.mac) or DEFAULT_NAME
+            self._flash_ticked = bool(user_input.get(CONF_FLASH))
+            if self._flash_ticked:
+                return await self.async_step_flash()
             await self.async_set_unique_id(format_mac(self.mac), raise_on_progress=False)
             self._abort_if_unique_id_configured()
             return await self.async_step_validate()
@@ -107,10 +137,13 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         device_options = {dev.address: f"{dev.name} ({dev.address})" for dev in discovered_devices}
         device_options[MANUAL_MAC] = "Enter MAC address manually"
 
+        # After a flash, the same device and the tick box stay as they were.
+        selected = {"default": self.mac} if self.mac in device_options else {}
         return self.async_show_form(
             step_id='user',
             data_schema=vol.Schema({
-                vol.Required(CONF_MAC): vol.In(device_options)
+                vol.Required(CONF_MAC, **selected): vol.In(device_options),
+                vol.Optional(CONF_FLASH, default=self._flash_ticked): bool,
             }),
             description_placeholders={
                 "description": "Please select a device to configure"
@@ -132,8 +165,10 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
         self.mac = discovery_info.address
         self._discovered = True
-        self._discovered_name = discovery_info.name or DEFAULT_NAME
-        self.name = self._discovered_name
+        self.name = discovery_info.name or DEFAULT_NAME
+        # In the Discovered list and the form's title, with the end of the
+        # address to tell devices apart; it is added under its own name.
+        self._discovered_name = _label(self.name, self.mac)
         self.context["title_placeholders"] = {"name": self._discovered_name}
         return await self.async_step_bluetooth_confirm()
 
@@ -142,15 +177,66 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         user_input: dict[str, Any] | None = None,
         errors: dict[str, str] | None = None,
     ) -> ConfigFlowResult:
-        """Confirm a discovered device, then detect its channels."""
-        if user_input is not None:
-            return await self.async_step_validate()
+        """The Setup confirm form: flash the device's lights, or set it up."""
+        if errors:
+            self._note = _ERROR_NOTES.get(errors.get("base", ""), _ERROR_NOTES["unknown"])
         self._set_confirm_only()
-        return self.async_show_form(
+        note, self._note = self._note, ""
+        return self.async_show_menu(
             step_id="bluetooth_confirm",
-            description_placeholders={"name": self._discovered_name, "address": self.mac},
-            errors=errors or {},
+            menu_options=["flash", "setup"],
+            description_placeholders={
+                "name": self._discovered_name,
+                "address": self.mac,
+                "note": f"\n\n**{note}**" if note else "",
+            },
         )
+
+    async def async_step_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set it up: run the checks."""
+        return await self.async_step_validate()
+
+    async def async_step_flash(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Flash the device's lights, to find which one it is."""
+        if self._flash_task is None:
+            self._flash_task = self.hass.async_create_task(self._flash())
+        if self._flash_task.done():
+            return self.async_show_progress_done(next_step_id="flash_done")
+        return self.async_show_progress(
+            step_id="flash",
+            progress_action="flashing",
+            progress_task=self._flash_task,
+        )
+
+    async def _flash(self) -> str | None:
+        """Identify, as the button does; an error key if it couldn't."""
+        smartmatic = SmartMatic(self.hass, self.mac)
+        try:
+            await smartmatic.identify()
+        except NotIdle:
+            return "flash_not_idle"
+        except Exception as e:  # unreachable, unanswered or refused
+            _LOGGER.debug("Couldn't flash %s: %s", self.mac, e)
+            return "flash_no_reply"
+        finally:
+            await smartmatic.disconnect()
+        return None
+
+    async def async_step_flash_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Back to the form the flash was asked from."""
+        assert self._flash_task is not None
+        error = self._flash_task.result()
+        self._flash_task = None
+        if self._discovered:
+            self._note = _FLASH_NOTES.get(error or "", "")
+            return await self.async_step_bluetooth_confirm()
+        return await self.async_step_user(errors={"base": error} if error else None)
 
     async def async_step_manual_mac(
         self,
@@ -265,9 +351,11 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         return self._create_entry()
 
     def async_remove(self) -> None:
-        """Stop detection if the dialog is closed while it runs."""
+        """Stop detection or a flash if the dialog is closed while it runs."""
         if self._detect_task is not None:
             self._detect_task.cancel()
+        if self._flash_task is not None:
+            self._flash_task.cancel()
 
     async def async_step_reconfigure(
         self,

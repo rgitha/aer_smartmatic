@@ -5,12 +5,20 @@
       "user": {
         "title": "Select Device",
         "data": {
-          "mac": "Device"
+          "mac": "Device",
+          "flash": "Flash its lights only"
+        },
+        "data_description": {
+          "flash": "To find which device this is. Untick it to set the device up."
         }
       },
       "bluetooth_confirm": {
         "title": "Set up {name}",
-        "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to check that it responds."
+        "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to check that it responds.\n\nNot sure which one this is? Flash its lights to find it.{note}",
+        "menu_options": {
+          "flash": "Flash its lights",
+          "setup": "Set it up"
+        }
       },
       "manual_mac": {
         "title": "Enter MAC Address",
@@ -28,7 +36,9 @@
       "invalid_mac": "Invalid MAC address",
       "invalid_device": "This is not a supported Smart Matic device",
       "unknown": "[%key:common::config_flow::error::unknown%]",
-      "no_reply": "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, disconnect any phone connected to it, and try again."
+      "no_reply": "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, disconnect any phone connected to it, and try again.",
+      "flash_not_idle": "Its lights can't flash while auto-spray or a schedule is running.",
+      "flash_no_reply": "The device didn't respond."
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
@@ -40,7 +50,8 @@
       "checking_defaults": "Checking that the device responds…",
       "checking_clock": "Checking the device's clock…",
       "probing": "Trying connection option {index} of {total}…",
-      "probing_again": "Setting the clock and trying connection option {index} of {total} again…"
+      "probing_again": "Setting the clock and trying connection option {index} of {total} again…",
+      "flashing": "Flashing its lights…"
     }
   },
   "services": {
