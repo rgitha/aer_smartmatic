@@ -15,12 +15,12 @@
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/rgitha/aer_smartmatic",
-  "issues": "https://github.com/rgitha/aer_smartmatic/issues",
-  "homekit": {},
+  "integration_type": "device",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/rgitha/aer_smartmatic/issues",
   "requirements": [
     "bleak>=0.17.0",
     "bleak-retry-connector>=3.0.0"
   ],
-  "version": "0.2.0"
+  "version": "0.2.1"
 }
