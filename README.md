@@ -1,7 +1,7 @@
-# Aer Smart Matic Integration for Home Assistant
+# Godrej Aer Smart Matic Integration for Home Assistant
 
-A custom integration for the Aer Smart Matic, a battery-powered Bluetooth Low
-Energy (BLE) air freshener. It reads the device's status and controls it
+A custom integration for the Godrej Aer Smart Matic, a battery-powered Bluetooth
+ (BLE) air freshener. It reads the device's status and controls it
 locally over Bluetooth, through an adapter on the Home Assistant host or an
 ESPHome Bluetooth proxy. No cloud account is needed.
 
@@ -25,7 +25,7 @@ schedules, actions and other new features. See the
 
 ## Requirements
 
-- Home Assistant with Bluetooth: an adapter on the host, or an ESPHome
+- Home Assistant: with Bluetooth adapter on the host, or an ESPHome
   Bluetooth proxy within range of the device.
 - An Aer Smart Matic. Tested on firmware 3.0.8-IN.
 - No phone connected to the device while Home Assistant uses it.
@@ -57,26 +57,20 @@ folder and restart Home Assistant.
 
 ## Configuration
 
-Home Assistant discovers devices it can hear and offers them under
-**Settings → Devices & services**; choose **Add** and confirm. To add one
-yourself, choose **Add integration → Aer Smart Matic**.
+Home Assistant discovers devices within range and offers them under
+**Settings → Devices & services**; choose **Add** and confirm. 
 
-| Step | Parameter | Description |
-|---|---|---|
-| Select device | Device | A Smart Matic that Home Assistant can hear, or **Enter MAC address manually**. |
-| Enter MAC address | MAC address | The device's Bluetooth address, e.g. `AA:BB:CC:DD:EE:FF`. |
+Or, to add one yourself, choose **Add integration → Aer Smart Matic**. Select a discovered 
+device or enter the device Bluetooth MAC address manually `AA:BB:CC:DD:EE:FF`.
 
 Home Assistant then checks that the device responds and adds it as "Smart
-Matic". In the dialog that follows, give it a name (e.g. Hall) and an area.
+Matic". In the dialog that follows, give it a name (e.g. Smart Matic Hall) and an area.
 
-Setup also checks that the device keeps time, which schedules need. A device
-whose clock doesn't work is still added, without schedules: it gets no
-Schedules sensor and the schedule actions are refused. The Status sensor's
-**has_clock** attribute shows the result.
+Setup also checks whether the device firmware supports on-device schedules. The Status sensor's
+**has_clock** attribute shows the result. A device that does not support schedules has its 
+schedules related features disabled in the UI.
 
-There are no other options. If the device stops answering after a firmware
-update, use **Reconfigure** on the integration entry; it runs these checks
-again.
+Use **Reconfigure** on the integration entry to re-run these checks at any time and reconfigure the device.
 
 ## Entities
 
@@ -84,7 +78,7 @@ again.
 - **Spray now:** sprays once.
 - **Spray: auto:** Off, or every 10, 20 or 40 minutes. The `started_by`
   attribute shows what started it: app, schedule or button.
-- **Reset refill level:** after replacing the cartridge.
+- **Reset refill level:** after replacing the cartridge, to reset the spray count back to maximum.
 - **Identify** (diagnostic): lights the device's three interval lights for 3
   seconds. It works only while auto-spray is off and no schedule is running.
 - **Update status:** reads the status and schedules now.
@@ -92,11 +86,10 @@ again.
 **Sensors**
 - **Status:** Idle, Auto, Schedule or Disconnected. Its **has_clock**
   attribute shows whether the device keeps time (see Configuration).
-- **Battery:** a percentage of what the device can use, from 3.1 V (100 %)
+- **Battery:** Battery percentage, from 3.1 V (100 %)
   down to its 2.4 V cut-off (0 %). The voltage is a diagnostic sensor
   (disabled by default).
-- **Refill level** (an estimate from the spray count) and **Spray count**
-  (lifetime).
+- **Refill level** (an estimate from the spray count) and **Spray count**.
 - **Schedules:** the number of schedules on the device. Its attributes list
   them (days, start, end, interval), the one **running** now, and when they
   were **last read**.
@@ -110,7 +103,7 @@ again.
   then.
 - **Signal strength:** with the adapter or proxy that received it.
 - **Channel: command**, **Channel: reply** and **Connection link:** for
-  debugging, disabled by default.
+  debugging Bluetooth setup, disabled by default.
 
 **Diagnostics download:** on the device page, ⋮ → Download diagnostics. The
 address and name are redacted.
@@ -123,15 +116,10 @@ minutes.
 
 - An end at or before the start means the next day, so a window can run past
   midnight, up to 24 hours.
-- The end is rounded down to a whole interval, and a schedule holds at most
-  144 sprays.
-- A saved schedule that covers the current time starts within about a minute,
-  with a spray.
-- Saving interrupts a schedule that is running, since the device replaces the
+- Saving schedules restarts a schedule that is running, since the device replaces the
   whole list.
 
-The integration keeps the device's clock in step with Home Assistant's, so
-there's nothing to set. Edit schedules with the companion card or the
+The integration periodically syncs the device's clock with Home Assistant's. Edit schedules with the companion card or the
 actions below.
 
 ## Actions
@@ -235,19 +223,18 @@ The device keeps its auto-spray setting and schedules, and runs on its own.
 
 ## Known limitations
 
-- **Range:** the device's Bluetooth range is short. Keep it close to an
-  adapter or proxy.
-- **One connection at a time:** while a phone is connected to the device, Home
-  Assistant can't reach it.
+- **Range:** Keep it within range of an adapter or proxy.
+- **One connection at a time:** while there is another connection to the device, Home
+  Assistant can't reach it as the device supports only one connection at a time.
 - **Status isn't live:** changes made on the device or a phone show up at the
-  next read (up to an hour), or sooner with Update status.
+  next status update.
 - **Low batteries:** below 2.4 V the device still acknowledges sprays without
   spraying. Spray now and Spray: auto then show "Batteries are too low to
   spray".
 - **Refill level** is an estimate from the spray count, not a measurement.
 - **Schedules from other tools:** a phone app that writes the device's
   schedules may not read them first, so a change made there can replace the
-  ones set here. Manage them from one place.
+  ones set here.
 - **Skipping ahead:** only a schedule that is running can be skipped; a later
   run can't be skipped in advance.
 
@@ -257,15 +244,15 @@ The device keeps its auto-spray setting and schedules, and runs on its own.
   batteries, move it closer to an adapter or proxy, disconnect any phone
   connected to it and try again.
 - **Unreachable or Disconnected:** as above. **Signal strength** shows how well
-  the adapter or proxy hears the device.
+  the adapter or proxy heard the device.
 - **"The device is busy with another command":** another command or read is
   still running. Try again in a moment.
 - **A command shows an error:** the device didn't confirm it within 5 seconds.
   The status is read again afterwards, so the entities show what the device is
   actually doing.
 - **No Schedules sensor, or schedule actions are refused:** the device's
-  clock didn't work at setup (Status's **has_clock** is false). Use
-  **Reconfigure** to check again.
+  clock didn't work at setup or the particular device firmware has no schedules support (Status's **has_clock** is false). Use
+  **Reconfigure** to check again, if the device supports schedules.
 - **The proxy seems stuck:** an ESPHome Bluetooth proxy can get into a state
   where it still hears the device but can't connect to it. The log then warns
   that the device "is heard but can't be connected to". Restart the proxy.
@@ -308,5 +295,4 @@ requests.
 ## Disclaimer
 
 This project is not associated with Godrej Aer. All rights regarding the
-devices are reserved to Godrej Aer. It is experimental and not officially
-supported. Use at your own risk.
+devices are reserved to Godrej Aer. It is not officially supported. Use at your own risk.
