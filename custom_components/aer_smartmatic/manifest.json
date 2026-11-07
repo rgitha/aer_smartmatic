@@ -7,6 +7,9 @@
       "connectable": true
     }
   ],
+  "categories": [
+    "appliances_cleaning"
+  ],
   "codeowners": [
     "@rgitha"
   ],
