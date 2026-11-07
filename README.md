@@ -1,7 +1,7 @@
 # Godrej Aer Smart Matic Integration for Home Assistant
 
 A custom integration for the Godrej Aer Smart Matic, a battery-powered Bluetooth
- (BLE) air freshener. It reads the device's status and controls it
+(BLE) air freshener. It reads the device's status and controls it
 locally over Bluetooth, through an adapter on the Home Assistant host or an
 ESPHome Bluetooth proxy. No cloud account is needed.
 
@@ -25,7 +25,7 @@ schedules, actions and other new features. See the
 
 ## Requirements
 
-- Home Assistant: with Bluetooth adapter on the host, or an ESPHome
+- Home Assistant with a Bluetooth adapter on the host, or an ESPHome
   Bluetooth proxy within range of the device.
 - An Aer Smart Matic. Tested on firmware 3.0.8-IN.
 - No phone connected to the device while Home Assistant uses it.
@@ -58,17 +58,17 @@ folder and restart Home Assistant.
 ## Configuration
 
 Home Assistant discovers devices within range and offers them under
-**Settings → Devices & services**; choose **Add** and confirm. 
+**Settings → Devices & services**; choose **Add** and confirm.
 
-Or, to add one yourself, choose **Add integration → Aer Smart Matic**. Select a discovered 
-device or enter the device Bluetooth MAC address manually `AA:BB:CC:DD:EE:FF`.
+Or, to add one yourself, choose **Add integration → Aer Smart Matic**. Select a discovered
+device or enter the device's Bluetooth MAC address manually, e.g. `AA:BB:CC:DD:EE:FF`.
 
 Home Assistant then checks that the device responds and adds it as "Smart
 Matic". In the dialog that follows, give it a name (e.g. Smart Matic Hall) and an area.
 
 Setup also checks whether the device firmware supports on-device schedules. The Status sensor's
-**has_clock** attribute shows the result. A device that does not support schedules has its 
-schedules related features disabled in the UI.
+**has_clock** attribute shows the result. A device that does not support schedules has its
+schedule features removed: no Schedules sensor, and the schedule actions are refused.
 
 Use **Reconfigure** on the integration entry to re-run these checks at any time and reconfigure the device.
 
@@ -78,7 +78,8 @@ Use **Reconfigure** on the integration entry to re-run these checks at any time 
 - **Spray now:** sprays once.
 - **Spray: auto:** Off, or every 10, 20 or 40 minutes. The `started_by`
   attribute shows what started it: app, schedule or button.
-- **Reset refill level:** after replacing the cartridge, to reset the spray count back to maximum.
+- **Reset refill level:** after replacing the cartridge. The device resets its spray count to zero,
+  so Refill level goes back to 100 %.
 - **Identify** (diagnostic): lights the device's three interval lights for 3
   seconds. It works only while auto-spray is off and no schedule is running.
 - **Update status:** reads the status and schedules now.
@@ -86,10 +87,11 @@ Use **Reconfigure** on the integration entry to re-run these checks at any time 
 **Sensors**
 - **Status:** Idle, Auto, Schedule or Disconnected. Its **has_clock**
   attribute shows whether the device keeps time (see Configuration).
-- **Battery:** Battery percentage, from 3.1 V (100 %)
+- **Battery:** battery percentage, from 3.1 V (100 %)
   down to its 2.4 V cut-off (0 %). The voltage is a diagnostic sensor
   (disabled by default).
-- **Refill level** (an estimate from the spray count) and **Spray count**.
+- **Refill level** (an estimate from the spray count) and **Spray count**
+  (since the last refill reset).
 - **Schedules:** the number of schedules on the device. Its attributes list
   them (days, start, end, interval), the one **running** now, and when they
   were **last read**.
