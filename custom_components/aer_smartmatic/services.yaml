@@ -5,15 +5,11 @@ update_status:
     and its schedules. Bypasses the automatic retry
     cooldown. If no target is given, every configured device is updated.
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
 
 set_schedules:
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
   fields:
@@ -31,8 +27,6 @@ set_schedules:
 
 add_schedule:
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
   fields:
@@ -82,8 +76,6 @@ add_schedule:
 
 remove_schedule:
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
   fields:
@@ -98,15 +90,11 @@ remove_schedule:
 
 clear_schedules:
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
 
 stop_schedule:
   target:
-    device:
-      integration: aer_smartmatic
     entity:
       integration: aer_smartmatic
   fields:
