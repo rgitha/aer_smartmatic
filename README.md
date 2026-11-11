@@ -25,17 +25,30 @@ schedules, actions and other new features. See the
 
 ## Requirements
 
-- Home Assistant with a Bluetooth adapter on the host, or an ESPHome
-  Bluetooth proxy within range of the device.
+- Home Assistant (tested on 2026.2 and later), with a Bluetooth adapter on
+  the host, or an ESPHome Bluetooth proxy within range of the device.
 - An Aer Smart Matic. Tested on firmware 3.0.8-IN.
 - No phone connected to the device while Home Assistant uses it.
 
 ## Companion card
 
-The [Card for Godrej Aer Smart Matic](https://github.com/rgitha/godrej-aer-card)
-shows the status, Spray now, auto-spray and the schedules in one card, and
-lets you add and edit schedules from a dashboard. **It is installed
-separately**, from its own repository.
+The **Card for Godrej Aer Smart Matic** shows the status, Spray now,
+auto-spray and the schedules in one card, and lets you add and edit schedules
+from a dashboard. It comes with the integration, so there's nothing else to
+install.
+
+To add it, edit a dashboard, choose **Add card** and search for **Godrej**.
+Pick the device; optionally give it a title, and choose whether to show every
+schedule or just the running or next one. In YAML:
+
+```yaml
+type: custom:aer-smartmatic-card
+device: <your Smart Matic device>
+show_schedules: false
+```
+
+After installing or updating the integration, refresh the browser so it loads
+the card.
 
 <p>
   <img src="docs/images/card.png" alt="The companion card with its schedules" width="49%">

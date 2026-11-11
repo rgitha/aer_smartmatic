@@ -1,6 +1,10 @@
 {
   "domain": "aer_smartmatic",
   "name": "Godrej Aer Smart Matic",
+  "after_dependencies": [
+    "frontend",
+    "http"
+  ],
   "bluetooth": [
     {
       "local_name": "Smart Matic*",
@@ -25,5 +29,5 @@
     "bleak>=0.17.0",
     "bleak-retry-connector>=3.0.0"
   ],
-  "version": "0.2.1"
+  "version": "0.3.0"
 }

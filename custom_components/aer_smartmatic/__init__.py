@@ -11,6 +11,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_COMMAND_CHAR, CONF_HAS_CLOCK, CONF_REPLY_CHAR
 from .const import DOMAIN
+from .card import async_register_card
 from .coordinator import SmartMaticCoordinator
 from .godrej import SmartMatic
 from .godrej.events import DEVICE_STATUS_UPDATE
@@ -30,8 +31,9 @@ PLATFORMS: list[Platform] = [
 ]
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the integration's actions, once."""
+    """Register the integration's actions and its dashboard card, once."""
     async_setup_services(hass)
+    await async_register_card(hass)
     return True
 
 
