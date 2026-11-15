@@ -1,9 +1,13 @@
 """The Smart Matic's coordinator: when to read it, and its entities' updates.
 
-Home Assistant's Bluetooth coordinator calls ``needs_poll`` on each of the
-device's advertisements. A status read is due when none succeeded in the
-last hour, or the last exchange failed (with a back-off after failures);
-the device code decides that, and does the reading.
+Whether a status read is due is checked at each advertisement Home
+Assistant passes on, and every minute while the device is heard. Home
+Assistant passes on an advertisement only when its content changes, and the
+Smart Matic's never does (just its name), so without the timer the hourly
+read and the retries after a failure would never happen. A read is due when
+none succeeded in the last hour, or the last exchange failed (with a
+back-off after failures); the device code decides that, and does the
+reading.
 
 The coordinator also reads the status around each schedule's start and
 end, so a run starting or ending shows without waiting for the hourly read,
@@ -13,7 +17,7 @@ one read when several ask at once.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from homeassistant.components import bluetooth
@@ -22,7 +26,7 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import async_track_point_in_time, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from .godrej import SmartMatic
@@ -36,6 +40,10 @@ from .godrej.events import (
 from .godrej.schedule import next_change
 
 _LOGGER = logging.getLogger(__name__)
+
+# How often to check whether a read is due, between advertisements. The
+# check itself sends nothing to the device.
+POLL_CHECK_INTERVAL = timedelta(seconds=60)
 
 # The device code's events; each updates the entities.
 _EVENTS = (
@@ -72,10 +80,15 @@ class SmartMaticCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
             self.instance.eventbus.add_listener(event, self._on_device_event)
         self.instance.eventbus.add_listener(DEVICE_SCHEDULES_UPDATE, self._on_schedules)
         self._plan_next_change()
+        stop_checks = async_track_time_interval(
+            self.hass, self._check_poll, POLL_CHECK_INTERVAL,
+            name=f"Smart Matic {self.instance.mac} read check",
+        )
 
         @callback
         def _stop() -> None:
             stop_bluetooth()
+            stop_checks()
             for event in _EVENTS:
                 self.instance.eventbus.remove_listener(event, self._on_device_event)
             self.instance.eventbus.remove_listener(DEVICE_SCHEDULES_UPDATE, self._on_schedules)
@@ -107,6 +120,13 @@ class SmartMaticCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         self._last_service_info = service_info
         self.instance.set_advertising(True)
         if self.needs_poll(service_info):
+            self._debounced_poll.async_schedule_call()
+
+    @callback
+    def _check_poll(self, _now: datetime) -> None:
+        """Between advertisements: read if due, while the device is heard."""
+        info = self._last_service_info
+        if info is not None and self.instance.heard and self.needs_poll(info):
             self._debounced_poll.async_schedule_call()
 
     @callback

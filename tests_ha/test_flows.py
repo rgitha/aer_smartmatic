@@ -1,4 +1,5 @@
 """Config flow, reconfigure, entry setup and sensors against Home Assistant."""
+from datetime import timedelta
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -715,6 +716,58 @@ async def test_reads_follow_the_advertisements(hass):
             ADVERTS[-1](heard, BluetoothChange.ADVERTISEMENT)
             await hass.async_block_till_done()
             assert connect.await_count == 1  # not due: nothing read
+
+
+async def test_reads_are_checked_every_minute_between_advertisements(hass):
+    """Home Assistant passes on only advertisements whose content changed,
+    and the Smart Matic's never changes: a timer checks whether a read is
+    due, while the device is heard, and stops at unload."""
+    import time
+    from homeassistant.components.bluetooth import BluetoothChange
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+    from custom_components.aer_smartmatic.coordinator import POLL_CHECK_INTERVAL
+    from custom_components.aer_smartmatic.godrej.godrej import SmartMatic
+
+    entry = make_entry(hass)
+    connect = AsyncMock(return_value=True)
+    due = [False]
+    now = dt_util.utcnow()
+
+    async def tick():
+        nonlocal now
+        now += POLL_CHECK_INTERVAL + timedelta(seconds=1)
+        async_fire_time_changed(hass, now)
+        await hass.async_block_till_done()
+
+    with patch.object(SmartMatic, "needs_status_read", lambda self: due[0]):
+        await setup_entry(hass, entry, connect=connect)
+        with patch.object(SmartMatic, "connect_if_needed", connect):
+            instance = entry.runtime_data.instance
+            # Not heard yet: the timer reads nothing, even when due.
+            due[0] = True
+            await tick()
+            assert connect.await_count == 0
+            # One advertisement, then none: not due, nothing read.
+            due[0] = False
+            heard = SimpleNamespace(address=MAC, name="Smart Matic", rssi=-70, time=time.monotonic())
+            ADVERTS[-1](heard, BluetoothChange.ADVERTISEMENT)
+            await hass.async_block_till_done()
+            await tick()
+            assert connect.await_count == 0
+            # Due an hour later, with no new advertisement: the timer reads.
+            due[0] = True
+            await tick()
+            assert connect.await_count == 1
+            # Out of range: nothing read.
+            instance.set_advertising(False)
+            await tick()
+            assert connect.await_count == 1
+            instance.set_advertising(True)
+            # Unloaded: the timer stops.
+            await hass.config_entries.async_unload(entry.entry_id)
+            await tick()
+            assert connect.await_count == 1
 
 
 # --- schedules ---------------------------------------------------------------
