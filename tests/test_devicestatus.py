@@ -146,3 +146,13 @@ def test_status_summary_names_what_started_spraying():
     for code, source in ((113, "app"), (133, "button"), (111, None), (0, None)):
         status.current_status = code
         assert status.spray_source == source
+
+
+def test_a_status_is_recent_for_ten_minutes():
+    """A background read is due once the status is 10 minutes old."""
+    from datetime import timedelta
+    status = DeviceStatus(FRAME_308_IN)
+    status.date -= timedelta(minutes=9, seconds=50)
+    assert status.is_valid
+    status.date -= timedelta(seconds=20)
+    assert not status.is_valid

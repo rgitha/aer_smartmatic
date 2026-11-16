@@ -3,14 +3,14 @@
 Whether a status read is due is checked at each advertisement Home
 Assistant passes on, and every minute while the device is heard. Home
 Assistant passes on an advertisement only when its content changes, and the
-Smart Matic's never does (just its name), so without the timer the hourly
-read and the retries after a failure would never happen. A read is due when
-none succeeded in the last hour, or the last exchange failed (with a
+Smart Matic's never does (just its name), so without the timer the regular
+reads and the retries after a failure would never happen. A read is due when
+none succeeded in the last 10 minutes, or the last exchange failed (with a
 back-off after failures); the device code decides that, and does the
 reading.
 
 The coordinator also reads the status around each schedule's start and
-end, so a run starting or ending shows without waiting for the hourly read,
+end, so a run starting or ending shows without waiting for the next read,
 and runs Update status (the action, the button and update_entity), sharing
 one read when several ask at once.
 """

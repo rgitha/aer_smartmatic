@@ -6,11 +6,12 @@ from typing import Any
 from datetime import datetime, timedelta
 
 from . import cbor
-from .const import BATTERY_CURVE, SPRAY_CAPACITY
+from .const import BATTERY_CURVE, SPRAY_CAPACITY, STATUS_READ_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
-DEVICE_STATUS_VALIDITY_TIME = timedelta(minutes=60)
+# A status counts as recent this long; after that a background read is due.
+DEVICE_STATUS_VALIDITY_TIME = timedelta(seconds=STATUS_READ_INTERVAL)
 
 # Frame length the fixed-offset fallback decoder expects.
 STATUS_LEN = 99

@@ -57,11 +57,14 @@ the card.
 
 ## Installation
 
-### HACS
+### Marketplace or HACS (recommended)
 
-1. In HACS, open the menu and choose **Custom repositories**.
-2. Add `https://github.com/rgitha/aer_smartmatic` as an **Integration**.
-3. Install **Godrej Aer Smart Matic** and restart Home Assistant.
+[![Open in Marketplace](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=rgitha&repository=aer_smartmatic&category=integration)
+
+Click the button, or search for **Godrej Aer Smart Matic**:
+- **Home Assistant 2026.11 or later:** in **Settings → Marketplace**. Install it,
+  and setup starts straight away.
+- **Earlier versions:** in **HACS**. Download it and restart Home Assistant.
 
 ### Manual
 
@@ -214,9 +217,12 @@ automation:
 ## How it stays up to date
 
 The device doesn't report changes by itself, so the integration reads its
-status about once an hour, after every command, around each schedule's start
-and end, and when you press **Update status**. Changes made with the device's
-button or a phone show up at the next read.
+status about every 10 minutes, after every command, around each schedule's
+start and end, and when you press **Update status**. Changes made with the
+device's button or a phone show up at the next read.
+
+Each status read takes about 20 mA battery current for 2-3 seconds, a spray
+takes about 400 mA for 0.5 seconds.
 
 The device runs one command at a time. A command made while another is in
 progress waits its turn; if it can't start within 5 seconds, you'll see
@@ -231,7 +237,7 @@ soon as the device is heard again.
 
 1. Go to **Settings → Devices & services → Godrej Aer Smart Matic**.
 2. Open the device entry's ⋮ menu and choose **Delete**.
-3. To remove the integration completely, uninstall it in HACS (or delete
+3. To remove the integration completely, uninstall it in the Marketplace or HACS (or delete
    `custom_components/aer_smartmatic`) and restart Home Assistant.
 
 The device keeps its auto-spray setting and schedules, and runs on its own.

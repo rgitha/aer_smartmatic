@@ -1215,7 +1215,7 @@ class SmartMatic:
 
     @property
     def _status_due(self) -> bool:
-        """None in the last hour, the last exchange failed (so Connection
+        """None within STATUS_READ_INTERVAL, the last exchange failed (so Connection
         status can recover), or the device was out of hearing meanwhile."""
         return self._status_outdated or not (
             self.device_status

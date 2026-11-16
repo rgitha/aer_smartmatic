@@ -65,6 +65,11 @@ HEARD_RECENTLY = 30
 # On each new link the device's clock is read (114 -> 164) and set (102)
 # only if it is more than this many seconds off, or can't be read.
 CLOCK_TOLERANCE = 10
+# A background status read is due once the last one is this many seconds old.
+# Each read costs the device about 20 mA for 2-3 s (about 0.014 mAh), so every
+# 10 minutes is about 2 mAh a day: about a quarter less battery life than
+# hourly reads, when spraying every 20 minutes for 12 hours a day.
+STATUS_READ_INTERVAL = 600
 # In use, the clock is checked by background exchanges only, never ahead of
 # an action someone is waiting for: at most once an hour, and also after
 # Home Assistant starts, when the device is heard again (its batteries may
