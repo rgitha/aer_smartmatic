@@ -18,26 +18,25 @@
         "step": {
             "user": {
                 "title": "Select Device",
+                "description": "Set up devices which were not automatically discovered. Home Assistant will connect to the device and check which features it supports. This takes a few seconds.{ignored_note}",
                 "data": {
-                    "mac": "Device",
+                    "device": "Device",
+                    "address": "Enter MAC address",
                     "flash": "Flash its lights only"
                 },
                 "data_description": {
+                    "address": "Example AA:BB:CC:DD:EE:FF",
                     "flash": "To find which device this is. Untick it to set the device up."
                 }
             },
             "bluetooth_confirm": {
-                "title": "Set up {name}",
-                "description": "Set up the Smart Matic at {address}? Home Assistant will connect to it to check that it responds.\n\nNot sure which one this is? Flash its lights to find it.{note}",
-                "menu_options": {
-                    "flash": "Flash its lights",
-                    "setup": "Set it up"
-                }
-            },
-            "manual_mac": {
-                "title": "Enter MAC Address",
+                "title": "Set up Device",
+                "description": "**{device}**\n\nHome Assistant will connect to the device and check which features it supports. This takes a few seconds.",
                 "data": {
-                    "mac": "MAC Address"
+                    "flash": "Flash its lights only"
+                },
+                "data_description": {
+                    "flash": "To find which device this is. Untick it to set the device up."
                 }
             },
             "reconfigure": {

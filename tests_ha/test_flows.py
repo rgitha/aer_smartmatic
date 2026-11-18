@@ -70,7 +70,7 @@ async def pick_device(hass, result, detect):
          patch(f"{CF}.SmartMatic.disconnect", AsyncMock()), \
          patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"mac": MAC}
+            result["flow_id"], {"device": MAC}
         )
         result, _ = await finish_progress(hass, result)
         return result
@@ -626,7 +626,7 @@ async def test_setup_with_frontend_refreshes(hass):
          patch(f"{CF}.SmartMatic.disconnect", AsyncMock()), \
          patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
         last, invalid = await frontend_like_run(
-            hass, flow_id, lambda: hass.config_entries.flow.async_configure(flow_id, {"mac": MAC})
+            hass, flow_id, lambda: hass.config_entries.flow.async_configure(flow_id, {"device": MAC})
         )
     assert invalid == []
     assert last["type"] is FlowResultType.CREATE_ENTRY
@@ -1125,24 +1125,22 @@ async def test_bluetooth_discovery_sets_up_after_confirming(hass):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
     )
-    assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
-    assert result["menu_options"] == ["flash", "setup"]
-    # Every placeholder the step's title and text use must be given; the
-    # name carries the end of the address, to tell devices apart.
-    assert result["description_placeholders"] == {
-        "name": "Smart Matic (03-37)", "address": MAC, "note": "",
-    }
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
+    assert [str(k) for k in result["data_schema"].schema] == ["flash"]
+    # Every placeholder the step's text uses must be given.
+    assert result["description_placeholders"] == {"device": f"Smart Matic ({MAC})"}
+    # The Discovered list's name carries the end of the address.
     flow = hass.config_entries.flow.async_get(result["flow_id"])
     assert flow["context"]["title_placeholders"] == {"name": "Smart Matic (03-37)"}
 
     detect = AsyncMock(side_effect=[None, (C4, C1)])
     with patch(DETECT, detect), no_setup(), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "setup"})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"flash": False})
         result, _ = await finish_progress(hass, result)
-        # No reply: back to the Setup confirm form, saying why, to try again.
-        assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
-        assert "didn't respond" in result["description_placeholders"]["note"]
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "setup"})
+        # No reply: back to the Set up Device form, with the error, to try again.
+        assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
+        assert result["errors"] == {"base": "no_reply"}
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"flash": False})
         result, _ = await finish_progress(hass, result)
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Smart Matic"
@@ -1153,30 +1151,30 @@ IDENTIFY = f"{CF}.SmartMatic.identify"
 
 
 @pytest.mark.parametrize(
-    ("outcome", "note"),
+    ("outcome", "errors"),
     [
-        (None, ""),
-        (NotIdle("busy"), "can't flash while auto-spray or a schedule is running"),
-        (DeviceConnectionError("gone"), "didn't respond"),
+        (None, {}),
+        (NotIdle("busy"), {"base": "flash_not_idle"}),
+        (DeviceConnectionError("gone"), {"base": "flash_no_reply"}),
     ],
 )
-async def test_setup_confirm_flashes_the_lights(hass, outcome, note):
-    """Flash its lights, then back to the same Setup confirm form."""
+async def test_setup_confirm_flashes_the_lights(hass, outcome, errors):
+    """With the tick box, Submit flashes the lights and brings back the same
+    Set up Device form, the box still ticked."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
     )
     identify = AsyncMock(side_effect=outcome)
     disconnect = AsyncMock()
     with patch(IDENTIFY, identify), patch(f"{CF}.SmartMatic.disconnect", disconnect):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "flash"})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"flash": True})
         result, _ = await finish_progress(hass, result)
     identify.assert_awaited_once()
     disconnect.assert_awaited_once()
-    assert result["type"] is FlowResultType.MENU and result["step_id"] == "bluetooth_confirm"
-    assert note in result["description_placeholders"]["note"]
-    if not note:
-        assert result["description_placeholders"]["note"] == ""
-    # Nothing is added until Set it up.
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "bluetooth_confirm"
+    assert (result["errors"] or {}) == errors
+    assert next(iter(result["data_schema"].schema)).default() is True
+    # Nothing is added until it's submitted unticked.
     assert not hass.config_entries.async_entries(DOMAIN)
 
 
@@ -1194,18 +1192,18 @@ async def test_select_device_form_flashes_the_lights(hass, outcome, errors):
          patch(f"{CF}.SmartMatic.disconnect", AsyncMock()), \
          patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"mac": MAC, "flash": True}
+            result["flow_id"], {"device": MAC, "flash": True}
         )
         result, _ = await finish_progress(hass, result)
         identify.assert_awaited_once()
         detect.assert_not_awaited()
         assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
         assert (result["errors"] or {}) == (errors or {})
-        defaults = {str(k): k.default() for k in result["data_schema"].schema}
-        assert defaults == {"mac": MAC, "flash": True}
+        defaults = {str(k): k.default() for k in result["data_schema"].schema if callable(k.default)}
+        assert defaults == {"device": MAC, "flash": True}
         # Unticked, Submit sets it up.
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"mac": MAC, "flash": False}
+            result["flow_id"], {"device": MAC, "flash": False}
         )
         result, _ = await finish_progress(hass, result)
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -1225,25 +1223,37 @@ async def test_bluetooth_discovery_of_a_configured_or_other_device_aborts(hass):
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "already_configured"
 
 
-async def test_manual_mac_setup(hass):
+async def test_setup_by_address(hass):
+    """Other, with an address: invalid addresses are refused on the field;
+    a failed setup comes back to the form with the address kept."""
     result = await start_flow(hass)
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": "manual_mac"})
-    assert result["step_id"] == "manual_mac"
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": "not-a-mac"})
-    assert result["errors"] == {"base": "invalid_mac"}
-
+    with patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"device": "other", "address": "not-a-mac"}
+        )
+    assert result["step_id"] == "user" and result["errors"] == {"address": "invalid_mac"}
     detect = AsyncMock(side_effect=[RuntimeError("boom"), (C4, C1)])
-    with patch(DETECT, detect), no_setup(), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": MAC})
+    with patch(DETECT, detect), no_setup(), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()), \
+         patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"device": "other", "address": MAC.lower()}
+        )
         result, _ = await finish_progress(hass, result)
-        # An unexpected error: back to the address form, to try again.
-        assert result["step_id"] == "manual_mac" and result["errors"] == {"base": "unknown"}
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mac": MAC})
+        # An unexpected error: back to the form, to try again.
+        assert result["step_id"] == "user" and result["errors"] == {"base": "unknown"}
+        assert next(k for k in result["data_schema"].schema if str(k) == "address").description == {
+            "suggested_value": MAC.lower()
+        }
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"device": "other", "address": MAC.lower()}
+        )
         result, _ = await finish_progress(hass, result)
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["mac"] == MAC
 
 
 async def test_configured_devices_are_not_listed(hass):
+    """Nothing left to pick from: just the address and the tick box."""
     make_entry(hass)
     other = SimpleNamespace(address="11:22:33:44:55:66", name="Phone")
     with patch(f"{CF}.async_discovered_service_info",
@@ -1251,9 +1261,53 @@ async def test_configured_devices_are_not_listed(hass):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
         )
-    schema = result["data_schema"].schema
-    options = next(iter(schema.values())).container
-    assert list(options) == ["manual_mac"]
+    assert result["step_id"] == "user"
+    assert [str(k) for k in result["data_schema"].schema] == ["address", "flash"]
+    assert result["description_placeholders"] == {"ignored_note": ""}
+
+
+def device_options(result):
+    key = next(k for k in result["data_schema"].schema if str(k) == "device")
+    return [o["value"] for o in result["data_schema"].schema[key].config["options"]]
+
+
+async def test_devices_waiting_in_discovered_are_not_listed(hass):
+    """A device already offered in the Discovered list isn't listed again;
+    others still are, and a single one is picked already."""
+    other = SimpleNamespace(address="A4:C1:38:00:00:01", name="Smart Matic")
+    with patch(f"{CF}.async_discovered_service_info", return_value=[*discovered(), other]):
+        await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_BLUETOOTH}, data=advert()
+        )
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    assert device_options(result) == [other.address, "other"]
+    key = next(k for k in result["data_schema"].schema if str(k) == "device")
+    assert key.default() == other.address
+
+
+async def test_several_devices_none_picked(hass):
+    other = SimpleNamespace(address="A4:C1:38:00:00:01", name="Smart Matic")
+    with patch(f"{CF}.async_discovered_service_info", return_value=[*discovered(), other]):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    assert device_options(result) == [MAC, other.address, "other"]
+    key = next(k for k in result["data_schema"].schema if str(k) == "device")
+    assert not callable(key.default)
+
+
+async def test_ignored_devices_are_not_listed_but_noted(hass):
+    """An ignored device that's heard isn't listed; a note under the address
+    says some are ignored."""
+    MockConfigEntry(domain=DOMAIN, unique_id=MAC.lower(), source=config_entries.SOURCE_IGNORE).add_to_hass(hass)
+    with patch(f"{CF}.async_discovered_service_info", return_value=discovered()):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+    assert [str(k) for k in result["data_schema"].schema] == ["address", "flash"]
+    assert "set as ignored" in result["description_placeholders"]["ignored_note"]
 
 
 async def test_update_status_action_errors(hass):
@@ -1428,3 +1482,15 @@ async def test_a_swap_while_home_assistant_was_down_is_seen(hass):
         deliver_status(instance, battery_frame(3120))
         await hass.async_block_till_done()
     assert hass.states.get("sensor.hall_batteries_replaced").state != "2026-09-01T10:00:00+00:00"
+
+
+async def test_address_is_ignored_when_a_device_is_picked(hass):
+    result = await start_flow(hass)
+    detect = AsyncMock(return_value=(C4, C1))
+    with patch(DETECT, detect), no_setup(), patch(f"{CF}.SmartMatic.disconnect", AsyncMock()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"device": MAC, "address": "junk"}
+        )
+        result, _ = await finish_progress(hass, result)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["mac"] == MAC

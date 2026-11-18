@@ -14,6 +14,13 @@ from collections.abc import Awaitable
 from homeassistant.config_entries import SOURCE_RECONFIGURE, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_MAC, CONF_NAME
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+)
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
@@ -25,28 +32,17 @@ from .godrej.exception import InvalidDeviceError, ConnectionError, NotIdle
 
 _LOGGER = logging.getLogger(__name__)
 
-MANUAL_MAC = "manual_mac"
+# The Select device form's fields: a heard device, or Other and an address.
+CONF_DEVICE = "device"
+CONF_ADDRESS = "address"
+OTHER = "other"
+# A line of its own in the form's text, when an ignored Smart Matic is heard.
+_IGNORED_NOTE = "\n\nNote: some Smart Matics are set as ignored in the Devices & Services menu"
 # The name devices advertise; the default device name.
 DEFAULT_NAME = "Smart Matic"
 _MAC_RE = re.compile(r"([0-9a-f]{2}:){5}[0-9a-f]{2}")
 # The Select device form's tick box: flash the chosen device's lights only.
 CONF_FLASH = "flash"
-# Shown on the Setup confirm form when its lights couldn't flash.
-_FLASH_NOTES = {
-    "flash_not_idle": "Its lights can't flash while auto-spray or a schedule is running.",
-    "flash_no_reply": "The device didn't respond.",
-}
-# A menu can't show errors: the Setup confirm form shows a failed setup's
-# reason as a note instead (the "error" texts in strings.json).
-_ERROR_NOTES = {
-    "cannot_connect": "Failed to connect.",
-    "invalid_device": "This is not a supported Smart Matic device.",
-    "no_reply": (
-        "The device didn't respond. Move it closer to a Bluetooth adapter or proxy, "
-        "disconnect any phone connected to it, and try again."
-    ),
-    "unknown": "Unexpected error.",
-}
 
 
 def _label(name: str, mac: str) -> str:
@@ -65,7 +61,7 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         self.command_char: str | None = None
         self.reply_char: str | None = None
         self.has_clock = True
-        self._manual_entry = False
+        self._form_values: dict[str, Any] = {}
         self._discovered = False
         self._discovered_name = DEFAULT_NAME
         self._smartmatic: SmartMatic | None = None
@@ -76,7 +72,6 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         self._waiter: asyncio.Task[None] | None = None
         self._flash_task: asyncio.Task[str | None] | None = None
         self._flash_ticked = False
-        self._note = ""
 
     def _is_device_supported(self, device_info: BluetoothServiceInfoBleak) -> bool:
         name = device_info.name or ""
@@ -104,51 +99,80 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         user_input: dict[str, Any] | None = None,
         errors: dict[str, str] | None = None
     ) -> ConfigFlowResult:
-        """Handle the initial step."""
+        """The Select device form: a heard device, or an address."""
         if user_input is not None:
-            if user_input[CONF_MAC] == MANUAL_MAC:
-                self._manual_entry = True
-                return await self.async_step_manual_mac()
-
-            self._manual_entry = False
-            self.mac = user_input[CONF_MAC]
-            self.name = self._listed_names.get(self.mac) or DEFAULT_NAME
+            self._form_values = dict(user_input)
+            choice = user_input.get(CONF_DEVICE, OTHER)
+            if choice == OTHER:
+                # format_mac returns anything it can't parse unchanged.
+                address = format_mac(str(user_input.get(CONF_ADDRESS, "")).strip())
+                if not _MAC_RE.fullmatch(address):
+                    return self._show_user_form({CONF_ADDRESS: "invalid_mac"})
+                self.mac = address.upper()
+                self.name = DEFAULT_NAME
+            else:
+                self.mac = choice
+                self.name = self._listed_names.get(choice) or DEFAULT_NAME
             self._flash_ticked = bool(user_input.get(CONF_FLASH))
             if self._flash_ticked:
                 return await self.async_step_flash()
             await self.async_set_unique_id(format_mac(self.mac), raise_on_progress=False)
             self._abort_if_unique_id_configured()
             return await self.async_step_validate()
+        return self._show_user_form(errors)
 
-        configured_ids = self._async_current_ids()
-        discovered_devices = []
-        discovered_infos = async_discovered_service_info(
-            self.hass,
-            connectable=True
-        )
-        for device_info in discovered_infos:
+    def _selectable_devices(self) -> tuple[list[BluetoothServiceInfoBleak], bool]:
+        """Smart Matics Home Assistant hears that aren't set up, ignored or
+        already waiting in the Discovered list; and whether any ignored one
+        is heard (for the note)."""
+        configured_ids = self._async_current_ids(include_ignore=False)
+        ignored_ids = self._async_current_ids() - configured_ids
+        waiting_ids = {
+            flow["context"].get("unique_id")
+            for flow in self._async_in_progress(include_uninitialized=True)
+        }
+        devices = []
+        ignored_heard = False
+        for device_info in async_discovered_service_info(self.hass, connectable=True):
             if not self._is_device_supported(device_info):
                 continue
-            if format_mac(device_info.address) in configured_ids:
-                continue
-            discovered_devices.append(device_info)
+            unique_id = format_mac(device_info.address)
+            if unique_id in ignored_ids:
+                ignored_heard = True
+            elif unique_id not in configured_ids and unique_id not in waiting_ids:
+                devices.append(device_info)
+        self._listed_names = {dev.address: dev.name for dev in devices if dev.name}
+        return devices, ignored_heard
 
-        self._listed_names = {dev.address: dev.name for dev in discovered_devices if dev.name}
-        device_options = {dev.address: f"{dev.name} ({dev.address})" for dev in discovered_devices}
-        device_options[MANUAL_MAC] = "Enter MAC address manually"
-
-        # After a flash, the same device and the tick box stay as they were.
-        selected = {"default": self.mac} if self.mac in device_options else {}
+    def _show_user_form(self, errors: dict[str, str] | None) -> ConfigFlowResult:
+        """The list (when there are devices), the address and the tick box,
+        keeping what was chosen or entered before a flash or an error."""
+        devices, ignored_heard = self._selectable_devices()
+        previous = self._form_values
+        schema: dict[Any, Any] = {}
+        if devices:
+            options = [
+                SelectOptionDict(value=dev.address, label=f"{dev.name} ({dev.address})")
+                for dev in devices
+            ] + [SelectOptionDict(value=OTHER, label="Other (enter address below)")]
+            values = {option["value"] for option in options}
+            default = previous.get(CONF_DEVICE)
+            if default not in values:
+                # Picked already when there's only one device.
+                default = devices[0].address if len(devices) == 1 else None
+            key = vol.Required(CONF_DEVICE, default=default) if default else vol.Required(CONF_DEVICE)
+            schema[key] = SelectSelector(
+                SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST)
+            )
+        schema[vol.Optional(
+            CONF_ADDRESS, description={"suggested_value": previous.get(CONF_ADDRESS)}
+        )] = TextSelector()
+        schema[vol.Optional(CONF_FLASH, default=self._flash_ticked)] = bool
         return self.async_show_form(
-            step_id='user',
-            data_schema=vol.Schema({
-                vol.Required(CONF_MAC, **selected): vol.In(device_options),
-                vol.Optional(CONF_FLASH, default=self._flash_ticked): bool,
-            }),
-            description_placeholders={
-                "description": "Please select a device to configure"
-            },
-            errors=errors
+            step_id="user",
+            data_schema=vol.Schema(schema),
+            description_placeholders={"ignored_note": _IGNORED_NOTE if ignored_heard else ""},
+            errors=errors or {},
         )
 
     async def async_step_bluetooth(
@@ -177,26 +201,22 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         user_input: dict[str, Any] | None = None,
         errors: dict[str, str] | None = None,
     ) -> ConfigFlowResult:
-        """The Setup confirm form: flash the device's lights, or set it up."""
-        if errors:
-            self._note = _ERROR_NOTES.get(errors.get("base", ""), _ERROR_NOTES["unknown"])
+        """The Set up Device form for a discovered device: flash its lights,
+        or set it up, as on the Select device form."""
+        if user_input is not None:
+            self._flash_ticked = bool(user_input.get(CONF_FLASH))
+            if self._flash_ticked:
+                return await self.async_step_flash()
+            return await self.async_step_validate()
         self._set_confirm_only()
-        note, self._note = self._note, ""
-        return self.async_show_menu(
+        return self.async_show_form(
             step_id="bluetooth_confirm",
-            menu_options=["flash", "setup"],
-            description_placeholders={
-                "name": self._discovered_name,
-                "address": self.mac,
-                "note": f"\n\n**{note}**" if note else "",
-            },
+            data_schema=vol.Schema(
+                {vol.Optional(CONF_FLASH, default=self._flash_ticked): bool}
+            ),
+            description_placeholders={"device": f"{self.name} ({self.mac})"},
+            errors=errors or {},
         )
-
-    async def async_step_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Set it up: run the checks."""
-        return await self.async_step_validate()
 
     async def async_step_flash(
         self, user_input: dict[str, Any] | None = None
@@ -233,41 +253,10 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._flash_task is not None
         error = self._flash_task.result()
         self._flash_task = None
+        errors = {"base": error} if error else None
         if self._discovered:
-            self._note = _FLASH_NOTES.get(error or "", "")
-            return await self.async_step_bluetooth_confirm()
-        return await self.async_step_user(errors={"base": error} if error else None)
-
-    async def async_step_manual_mac(
-        self,
-        user_input: dict[str, Any] | None = None,
-        errors: dict[str, str] | None = None,
-    ) -> ConfigFlowResult:
-        """Handle manual mac step."""
-        if user_input is not None:
-            self.mac = user_input[CONF_MAC]
-            # format_mac returns anything it can't parse unchanged.
-            normalized_mac = format_mac(self.mac)
-            if not _MAC_RE.fullmatch(normalized_mac):
-                return self.async_show_form(
-                    step_id="manual_mac",
-                    data_schema=vol.Schema({vol.Required(CONF_MAC): str}),
-                    errors={"base": "invalid_mac"},
-                )
-
-            await self.async_set_unique_id(normalized_mac, raise_on_progress=False)
-            self._abort_if_unique_id_configured()
-            return await self.async_step_validate()
-
-        return self.async_show_form(
-            step_id="manual_mac",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_MAC): str
-                }
-            ),
-            errors=errors or {},
-        )
+            return await self.async_step_bluetooth_confirm(errors=errors)
+        return await self.async_step_user(errors=errors)
 
     async def async_step_validate(
         self, user_input: "dict[str, Any] | None" = None
@@ -345,8 +334,6 @@ class AerSmartMaticConfigFlow(ConfigFlow, domain=DOMAIN):
         if error:
             if self._discovered:
                 return await self.async_step_bluetooth_confirm(errors={"base": error})
-            if self._manual_entry:
-                return await self.async_step_manual_mac(errors={"base": error})
             return await self.async_step_user(errors={"base": error})
         return self._create_entry()
 
